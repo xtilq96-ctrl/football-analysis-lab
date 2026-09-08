@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +37,9 @@ except ImportError:  # pragma: no cover - exercised only during Windows validati
 SPORTTERY_URL = (
     "https://webapi.sporttery.cn/gateway/uniform/football/"
     "getMatchCalculatorV1.qry?channel=c&poolCode=had,hhad"
+)
+SPORTTERY_RESULTS_URL = (
+    "https://webapi.sporttery.cn/gateway/uniform/football/getUniformMatchResultV1.qry"
 )
 SHANGHAI = timezone(timedelta(hours=8))
 HEADERS = {
@@ -93,6 +97,39 @@ def fetch_payload(url: str, timeout: float, retries: int = 3) -> tuple[dict[str,
             if attempt < retries:
                 time.sleep(2 ** (attempt - 1))
     raise RuntimeError(f"fetch failed after {retries} attempts: {last_error}")
+
+
+def fetch_results(timeout: float, retries: int = 3) -> list[dict[str, Any]]:
+    now = now_shanghai()
+    params = urllib.parse.urlencode({
+        "matchBeginDate": (now - timedelta(days=3)).date().isoformat(),
+        "matchEndDate": now.date().isoformat(),
+        "leagueId": "",
+        "pageSize": "200",
+        "pageNo": "1",
+        "isFix": "0",
+        "matchPage": "1",
+        "pcOrWap": "1",
+    })
+    url = f"{SPORTTERY_RESULTS_URL}?{params}"
+    headers = {**HEADERS, "Referer": "https://www.sporttery.cn/jc/zqsgkj/"}
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read())
+            if payload.get("success") is not True or str(payload.get("errorCode")) != "0":
+                raise RuntimeError("official result endpoint returned an unsuccessful payload")
+            results = payload.get("value", {}).get("matchResult", [])
+            if not isinstance(results, list):
+                raise RuntimeError("official result endpoint payload has an unexpected structure")
+            return [item for item in results if isinstance(item, dict)]
+        except (OSError, ValueError, urllib.error.URLError, RuntimeError) as error:
+            last_error = error
+            if attempt < retries:
+                time.sleep(2 ** (attempt - 1))
+    raise RuntimeError(f"result fetch failed after {retries} attempts: {last_error}")
 
 
 def flatten_matches(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -335,6 +372,45 @@ CREATE TABLE IF NOT EXISTS odds_history (
 );
 CREATE INDEX IF NOT EXISTS odds_history_match_time
   ON odds_history(match_id, collected_at);
+CREATE TABLE IF NOT EXISTS match_results (
+  match_id TEXT PRIMARY KEY,
+  full_time_score TEXT NOT NULL,
+  half_time_score TEXT,
+  home_goals INTEGER NOT NULL,
+  away_goals INTEGER NOT NULL,
+  actual_outcome TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  settled_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS prediction_settlements (
+  match_id TEXT PRIMARY KEY,
+  predicted_outcome TEXT,
+  predicted_score TEXT,
+  predicted_total_goals TEXT,
+  predicted_over_under TEXT,
+  actual_outcome TEXT NOT NULL,
+  actual_score TEXT NOT NULL,
+  actual_total_goals INTEGER NOT NULL,
+  outcome_hit INTEGER,
+  score_hit INTEGER,
+  total_goals_hit INTEGER,
+  over_under_hit INTEGER,
+  settled_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS two_leg_recommendations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date TEXT NOT NULL,
+  recommendation_key TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(business_date, recommendation_key)
+);
+CREATE TABLE IF NOT EXISTS two_leg_settlements (
+  recommendation_id INTEGER PRIMARY KEY,
+  hit INTEGER NOT NULL,
+  settled_at TEXT NOT NULL,
+  FOREIGN KEY(recommendation_id) REFERENCES two_leg_recommendations(id)
+);
 """
 
 
@@ -381,6 +457,176 @@ def save_matches(connection: sqlite3.Connection, matches: Iterable[dict[str, Any
     return count
 
 
+def settle_match_results(
+    connection: sqlite3.Connection,
+    official_results: list[dict[str, Any]],
+    settled_at: str,
+) -> tuple[int, int]:
+    completed = settled = 0
+    with connection:
+        for result in official_results:
+            match_id = str(result.get("matchId") or "")
+            score = str(result.get("sectionsNo999") or "")
+            if str(result.get("matchResultStatus")) != "2" or ":" not in score:
+                continue
+            try:
+                home_goals, away_goals = (int(value) for value in score.split(":", 1))
+            except ValueError:
+                continue
+            completed += 1
+            actual_outcome = "主胜" if home_goals > away_goals else "平局" if home_goals == away_goals else "客胜"
+            display_score = f"{home_goals}-{away_goals}"
+            result_payload = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            connection.execute(
+                """INSERT INTO match_results
+                   (match_id,full_time_score,half_time_score,home_goals,away_goals,actual_outcome,payload,settled_at)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(match_id) DO UPDATE SET
+                     full_time_score=excluded.full_time_score,
+                     half_time_score=excluded.half_time_score,
+                     home_goals=excluded.home_goals,
+                     away_goals=excluded.away_goals,
+                     actual_outcome=excluded.actual_outcome,
+                     payload=excluded.payload,
+                     settled_at=excluded.settled_at""",
+                (
+                    match_id, display_score, str(result.get("sectionsNo1") or ""),
+                    home_goals, away_goals, actual_outcome, result_payload, settled_at,
+                ),
+            )
+            prediction_row = connection.execute(
+                "SELECT payload FROM current_matches WHERE match_id=?", (match_id,)
+            ).fetchone()
+            if prediction_row is None:
+                continue
+            prediction = json.loads(prediction_row[0])
+            analysis = prediction.get("analysis") or {}
+            predicted_outcome = analysis.get("prediction")
+            predicted_score = analysis.get("predictedScore")
+            predicted_total = analysis.get("predictedTotalGoals")
+            over_probability = analysis.get("over25Probability")
+            under_probability = analysis.get("under25Probability")
+            predicted_over_under = None
+            if over_probability is not None and under_probability is not None:
+                predicted_over_under = "大2.5" if float(over_probability) >= float(under_probability) else "小2.5"
+            actual_total = home_goals + away_goals
+            total_hit = None
+            if predicted_total == "7+":
+                total_hit = int(actual_total >= 7)
+            elif str(predicted_total).isdigit():
+                total_hit = int(actual_total == int(predicted_total))
+            over_under_hit = None
+            if predicted_over_under:
+                over_under_hit = int(
+                    (predicted_over_under == "大2.5" and actual_total >= 3)
+                    or (predicted_over_under == "小2.5" and actual_total <= 2)
+                )
+            connection.execute(
+                """INSERT INTO prediction_settlements
+                   (match_id,predicted_outcome,predicted_score,predicted_total_goals,predicted_over_under,
+                    actual_outcome,actual_score,actual_total_goals,outcome_hit,score_hit,total_goals_hit,
+                    over_under_hit,settled_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(match_id) DO UPDATE SET
+                     actual_outcome=excluded.actual_outcome,
+                     actual_score=excluded.actual_score,
+                     actual_total_goals=excluded.actual_total_goals,
+                     outcome_hit=excluded.outcome_hit,
+                     score_hit=excluded.score_hit,
+                     total_goals_hit=excluded.total_goals_hit,
+                     over_under_hit=excluded.over_under_hit,
+                     settled_at=excluded.settled_at""",
+                (
+                    match_id, predicted_outcome, predicted_score, predicted_total, predicted_over_under,
+                    actual_outcome, display_score, actual_total,
+                    int(predicted_outcome == actual_outcome) if predicted_outcome else None,
+                    int(predicted_score == display_score) if predicted_score else None,
+                    total_hit, over_under_hit, settled_at,
+                ),
+            )
+            settled += 1
+    return completed, settled
+
+
+def save_two_leg_recommendations(
+    connection: sqlite3.Connection,
+    recommendations: dict[str, list[dict[str, Any]]],
+    created_at: str,
+) -> None:
+    with connection:
+        for business_date, items in recommendations.items():
+            for item in items:
+                identity = "|".join(
+                    sorted(f"{leg['matchId']}:{leg['pick']}" for leg in item["legs"])
+                )
+                connection.execute(
+                    """INSERT OR IGNORE INTO two_leg_recommendations
+                       (business_date,recommendation_key,payload,created_at) VALUES (?,?,?,?)""",
+                    (
+                        business_date, identity,
+                        json.dumps(item, ensure_ascii=False, separators=(",", ":")), created_at,
+                    ),
+                )
+
+
+def settle_two_leg_recommendations(connection: sqlite3.Connection, settled_at: str) -> int:
+    pending = connection.execute(
+        """SELECT r.id,r.payload FROM two_leg_recommendations r
+           LEFT JOIN two_leg_settlements s ON s.recommendation_id=r.id
+           WHERE s.recommendation_id IS NULL"""
+    ).fetchall()
+    count = 0
+    with connection:
+        for recommendation_id, payload in pending:
+            item = json.loads(payload)
+            leg_hits: list[bool] = []
+            complete = True
+            for leg in item.get("legs", []):
+                row = connection.execute(
+                    "SELECT actual_outcome FROM prediction_settlements WHERE match_id=?",
+                    (str(leg.get("matchId")),),
+                ).fetchone()
+                if row is None:
+                    complete = False
+                    break
+                leg_hits.append(row[0] == leg.get("pick"))
+            if complete and len(leg_hits) == 2:
+                connection.execute(
+                    "INSERT INTO two_leg_settlements(recommendation_id,hit,settled_at) VALUES (?,?,?)",
+                    (recommendation_id, int(all(leg_hits)), settled_at),
+                )
+                count += 1
+    return count
+
+
+def performance_summary(connection: sqlite3.Connection) -> dict[str, Any]:
+    row = connection.execute(
+        """SELECT COUNT(*),COALESCE(SUM(outcome_hit),0),COALESCE(SUM(score_hit),0),
+                  COALESCE(SUM(total_goals_hit),0),COALESCE(SUM(over_under_hit),0)
+           FROM prediction_settlements"""
+    ).fetchone()
+    combo = connection.execute(
+        "SELECT COUNT(*),COALESCE(SUM(hit),0) FROM two_leg_settlements"
+    ).fetchone()
+    total = int(row[0])
+    combo_total = int(combo[0])
+    rate = lambda hits, sample: round(hits / sample * 100, 1) if sample else None
+    return {
+        "settledMatches": total,
+        "outcomeHits": int(row[1]),
+        "outcomeHitRate": rate(int(row[1]), total),
+        "exactScoreHits": int(row[2]),
+        "exactScoreHitRate": rate(int(row[2]), total),
+        "totalGoalsHits": int(row[3]),
+        "totalGoalsHitRate": rate(int(row[3]), total),
+        "overUnderHits": int(row[4]),
+        "overUnderHitRate": rate(int(row[4]), total),
+        "settledTwoLegs": combo_total,
+        "twoLegHits": int(combo[1]),
+        "twoLegHitRate": rate(int(combo[1]), combo_total),
+    }
+
+
 def export_current(
     connection: sqlite3.Connection,
     output: Path,
@@ -397,7 +643,33 @@ def export_current(
         business_dates,
     ).fetchall()
     matches = [json.loads(row[0]) for row in rows]
+    for item in matches:
+        result = connection.execute(
+            """SELECT full_time_score,half_time_score,actual_outcome,settled_at
+               FROM match_results WHERE match_id=?""",
+            (item["matchId"],),
+        ).fetchone()
+        if result:
+            item["result"] = {
+                "fullTimeScore": result[0], "halfTimeScore": result[1],
+                "actualOutcome": result[2], "settledAt": result[3],
+            }
+        settlement = connection.execute(
+            """SELECT outcome_hit,score_hit,total_goals_hit,over_under_hit
+               FROM prediction_settlements WHERE match_id=?""",
+            (item["matchId"],),
+        ).fetchone()
+        if settlement:
+            item["settlement"] = {
+                "outcomeHit": bool(settlement[0]) if settlement[0] is not None else None,
+                "scoreHit": bool(settlement[1]) if settlement[1] is not None else None,
+                "totalGoalsHit": bool(settlement[2]) if settlement[2] is not None else None,
+                "overUnderHit": bool(settlement[3]) if settlement[3] is not None else None,
+            }
     recommendations = build_recommendations(matches, business_dates)
+    save_two_leg_recommendations(connection, recommendations, collected_at)
+    settle_two_leg_recommendations(connection, collected_at)
+    performance = performance_summary(connection)
     atomic_json(
         output,
         {
@@ -408,6 +680,7 @@ def export_current(
             "count": len(matches),
             "matches": matches,
             "recommendations": recommendations,
+            "performance": performance,
         },
     )
     return len(matches)
@@ -453,6 +726,16 @@ def run_once(args: argparse.Namespace) -> int:
             live_business_dates = sorted(
                 {str(item.get("businessDate") or "") for item in matches if item.get("businessDate")}
             )
+            result_count = settled_count = 0
+            result_error = None
+            try:
+                official_results = fetch_results(args.timeout, args.retries)
+                result_count, settled_count = settle_match_results(
+                    connection, official_results, collected_at
+                )
+            except Exception as error:
+                result_error = str(error)
+                logging.warning("result settlement skipped: %s", error)
             retained_count = export_current(
                 connection, data_dir / "latest.json", collected_at, live_business_dates
             )
@@ -460,8 +743,12 @@ def run_once(args: argparse.Namespace) -> int:
             health = {
                 "status": "ok", "checkedAt": collected_at, "liveMatchCount": live_count,
                 "retainedMatchCount": retained_count, "businessDates": live_business_dates,
+                "officialCompletedCount": result_count, "settledPredictionCount": settled_count,
+                "resultStatus": "ok" if result_error is None else "warning",
                 "source": "中国体育彩票官方接口",
             }
+            if result_error:
+                health["resultError"] = result_error
             atomic_json(data_dir / "health.json", health)
             with connection:
                 connection.execute(

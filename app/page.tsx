@@ -87,6 +87,7 @@ export default async function Home() {
               <StatusRow label="体彩官方赛程" value={data.error ? '重试中' : '已导入'} meta={`${data.matches.length} 场 · ${updatedAt}`} muted={Boolean(data.error)} />
               <StatusRow label="官方固定奖" value={withOdds ? '已接入' : '等待中'} meta={`${withOdds}/${data.matches.length} 场`} muted={!withOdds} />
               <StatusRow label="去水概率" value={predicted ? '已生成' : '等待中'} meta={`${predicted}/${data.matches.length} 场`} muted={!predicted} />
+              <StatusRow label="赛果自动结算" value={data.performance.settledMatches ? '已运行' : '等待完赛'} meta={`${data.performance.settledMatches} 场已核对`} muted={!data.performance.settledMatches} />
               <StatusRow label="数据模式" value={data.sourceMode === 'mainland_relay' ? '大陆自动采集' : data.sourceMode === 'live' ? '官方直连' : '官方快照'} meta={data.sourceMode === 'mainland_relay' ? '每 5 分钟更新' : data.sourceMode === 'live' ? '实时读取' : '自动恢复中'} muted={data.sourceMode === 'verified_snapshot'} />
             </CardContent>
           </Card>
@@ -95,6 +96,15 @@ export default async function Home() {
               <div className="flex items-center justify-between"><p className="text-sm font-medium text-white/75">预测数据覆盖</p><span className="text-xl font-semibold text-lime-300">{completeness}</span></div>
               <Progress value={completeness} className="mt-3 h-1.5 bg-white/8 [&_[data-slot=progress-indicator]]:bg-lime-300" />
               <p className="mt-3 text-xs leading-5 text-white/40">体彩固定奖去水概率已上线；API-Football 后续仅作为球队状态、伤停和比赛统计的辅助源。</p>
+            </CardContent>
+          </Card>
+          <Card className="border-white/8 bg-white/[.035] shadow-none">
+            <CardHeader className="pb-3"><CardTitle className="text-base font-medium">历史验证</CardTitle></CardHeader>
+            <CardContent className="grid grid-cols-2 gap-3 text-sm">
+              <Metric label="胜平负命中" value={data.performance.outcomeHitRate === null ? '—' : String(data.performance.outcomeHitRate)} unit={data.performance.outcomeHitRate === null ? '' : '%'} />
+              <Metric label="大小2.5命中" value={data.performance.overUnderHitRate === null ? '—' : String(data.performance.overUnderHitRate)} unit={data.performance.overUnderHitRate === null ? '' : '%'} />
+              <Metric label="精确比分命中" value={data.performance.exactScoreHitRate === null ? '—' : String(data.performance.exactScoreHitRate)} unit={data.performance.exactScoreHitRate === null ? '' : '%'} />
+              <Metric label="2串1命中" value={data.performance.twoLegHitRate === null ? '—' : String(data.performance.twoLegHitRate)} unit={data.performance.twoLegHitRate === null ? '' : '%'} />
             </CardContent>
           </Card>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-1 xl:grid-cols-2"><Metric label="今日竞彩" value={String(data.matches.length)} unit="场" /><Metric label="固定奖覆盖" value={String(completeness)} unit="%" /></div>
@@ -134,6 +144,7 @@ function MatchCard({ match }: { match: DashboardMatch }) {
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">{match.scoreProbabilities.slice(0, 3).map((score) => <Badge key={score.score} variant="outline" className="border-white/10 text-white/55">{score.score} · {score.probability}%</Badge>)}</div>
         </div>}
+        {match.result && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-400/15 bg-emerald-400/[.06] p-3 text-sm"><span className="text-white/65">官方赛果 <b className="ml-1 text-emerald-200">{match.result.fullTimeScore} · {match.result.actualOutcome}</b></span><span className={match.settlement?.outcomeHit ? 'text-emerald-300' : 'text-rose-300'}>{match.settlement?.outcomeHit ? '胜平负命中' : '胜平负未命中'}</span></div>}
         <p className="mt-4 border-t border-white/7 pt-4 text-sm leading-6 text-white/48">{match.note}</p>
       </CardContent>
     </Card>
