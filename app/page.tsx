@@ -65,7 +65,7 @@ export default async function Home() {
 
           <div className={`mb-5 flex items-start gap-3 rounded-2xl p-4 text-sm ${data.error ? 'border border-amber-400/15 bg-amber-400/[.065] text-amber-100/75' : 'border border-sky-400/15 bg-sky-400/[.065] text-sky-100/75'}`}>
             <CircleAlert className={`mt-0.5 h-4 w-4 shrink-0 ${data.error ? 'text-amber-300' : 'text-sky-300'}`} />
-            <p>{data.error ? <><span className="font-medium">官方数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : <><span className="font-medium text-sky-200">数据口径已纠正。</span> 场次编号、对阵、开赛时间、胜平负及让球固定奖均来自中国体育彩票官方公开接口；概率由官方固定奖去水换算。</>}</p>
+            <p>{data.error ? <><span className="font-medium">官方数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : data.sourceMode === 'verified_snapshot' ? <><span className="font-medium text-sky-200">已显示官方核验快照。</span> 海外云端被体彩接口拦截，当前为本机从官方接口核验的今日12场数据；部署大陆采集节点后才能自动刷新。</> : <><span className="font-medium text-sky-200">数据口径已纠正。</span> 场次编号、对阵、开赛时间、胜平负及让球固定奖均来自中国体育彩票官方公开接口；概率由官方固定奖去水换算。</>}</p>
           </div>
 
           {data.matches.length ? (
@@ -82,7 +82,7 @@ export default async function Home() {
               <StatusRow label="体彩官方赛程" value={data.error ? '重试中' : '已导入'} meta={`${data.matches.length} 场 · ${updatedAt}`} muted={Boolean(data.error)} />
               <StatusRow label="官方固定奖" value={withOdds ? '已接入' : '等待中'} meta={`${withOdds}/${data.matches.length} 场`} muted={!withOdds} />
               <StatusRow label="去水概率" value={predicted ? '已生成' : '等待中'} meta={`${predicted}/${data.matches.length} 场`} muted={!predicted} />
-              <StatusRow label="自动刷新" value="已启用" meta="官方数据缓存 5 分钟" />
+              <StatusRow label="数据模式" value={data.sourceMode === 'live' ? '官方实时' : '官方快照'} meta={data.sourceMode === 'live' ? '缓存 5 分钟' : '待部署大陆节点'} muted={data.sourceMode !== 'live'} />
             </CardContent>
           </Card>
           <Card className="overflow-hidden border-lime-300/12 bg-[linear-gradient(145deg,rgba(190,242,100,.09),rgba(255,255,255,.025))] shadow-none">
