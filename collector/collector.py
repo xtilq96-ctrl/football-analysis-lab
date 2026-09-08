@@ -241,7 +241,7 @@ def analysis_schedule(match: dict[str, Any], now: datetime | None = None) -> dic
     return {
         "phase": phase,
         "isLocked": current >= lock_at,
-        "isEarlyMatch": kickoff.time() < datetime.strptime("21:00", "%H:%M").time(),
+        "isEarlyMatch": kickoff.date() == business_date.date() and kickoff.time() < datetime.strptime("21:00", "%H:%M").time(),
         "finalAnalysisAt": final_at.isoformat(),
         "lockAt": lock_at.isoformat(),
         "minutesToKickoff": minutes,
