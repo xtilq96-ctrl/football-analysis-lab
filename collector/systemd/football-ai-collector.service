@@ -1,0 +1,19 @@
+[Unit]
+Description=Football AI official Sporttery collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=football-ai
+Group=football-ai
+ExecStart=/opt/football-ai/collector/collector.py --once
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/football-ai
+
+[Install]
+WantedBy=multi-user.target

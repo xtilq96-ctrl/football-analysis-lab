@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Football AI collector every five minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+RandomizedDelaySec=10s
+
+[Install]
+WantedBy=timers.target
