@@ -8,6 +8,13 @@
       "when": 1788840810226,
       "tag": "0000_dizzy_wendell_vaughn",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788851573838,
+      "tag": "0001_lovely_mac_gargan",
+      "breakpoints": true
     }
   ]
 }

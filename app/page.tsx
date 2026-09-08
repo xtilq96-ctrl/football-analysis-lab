@@ -1,27 +1,12 @@
 import {
-  Activity,
-  BarChart3,
-  Bell,
-  CalendarDays,
-  ChevronRight,
-  CircleAlert,
-  Clock3,
-  Database,
-  Gauge,
-  ShieldCheck,
-  Sparkles,
-  Trophy,
+  Activity, BarChart3, Bell, CalendarDays, ChevronRight, CircleAlert, Clock3,
+  Database, Gauge, ShieldCheck, Sparkles, Trophy,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
-
-const matches = [
-  { league: '英格兰超级联赛', time: '20:30', home: '曼城', away: '利物浦', probabilities: [44, 27, 29], goals: '2–4 球', confidence: 78, risk: '中风险', riskTone: 'amber', note: '双方近期进攻效率较高，成员模型对主胜判断存在分歧。' },
-  { league: '英格兰超级联赛', time: '23:00', home: '阿森纳', away: '布莱顿', probabilities: [61, 23, 16], goals: '2–3 球', confidence: 86, risk: '低风险', riskTone: 'green', note: '球队强度与市场基线方向一致，当前数据覆盖较完整。' },
-  { league: '英格兰超级联赛', time: '01:30', home: '切尔西', away: '纽卡斯尔联', probabilities: [39, 29, 32], goals: '1–3 球', confidence: 64, risk: '高风险', riskTone: 'red', note: '胜负概率接近，建议等待临场阵容和最后赔率快照。' },
-];
+import { getDashboardData, type DashboardMatch } from '@/lib/api-football';
 
 const riskStyles = {
   green: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300',
@@ -29,17 +14,24 @@ const riskStyles = {
   red: 'border-rose-400/25 bg-rose-400/10 text-rose-300',
 };
 
-export default function Home() {
+export default async function Home() {
+  const data = await getDashboardData();
+  const updatedAt = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date(data.updatedAt));
+  const predicted = data.matches.filter((match) => match.probabilities).length;
+  const completeness = data.matches.length ? Math.round((predicted / data.matches.length) * 100) : 0;
+
   return (
-    <main className="min-h-screen bg-background text-foreground">
+    <main className="min-h-screen bg-background pb-20 text-foreground lg:pb-0">
       <header className="sticky top-0 z-20 border-b border-white/8 bg-[#07110d]/90 backdrop-blur-xl">
         <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-3">
             <div className="grid h-9 w-9 place-items-center rounded-xl bg-lime-300 text-[#07110d] shadow-[0_0_24px_rgba(190,242,100,.16)]"><Trophy className="h-[19px] w-[19px]" /></div>
-            <div><p className="text-[15px] font-semibold leading-tight tracking-tight">足球 AI 分析台</p><p className="text-xs text-white/45">云端运行中</p></div>
+            <div><p className="text-[15px] font-semibold leading-tight tracking-tight">足球 AI 分析台</p><p className="text-xs text-white/45">真实数据试运行</p></div>
           </div>
           <div className="flex items-center gap-2">
-            <Badge className="hidden border-emerald-400/20 bg-emerald-400/10 text-emerald-300 sm:inline-flex"><span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-emerald-300" />系统正常</Badge>
+            <Badge className={`hidden sm:inline-flex ${data.error ? 'border-amber-400/20 bg-amber-400/10 text-amber-300' : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300'}`}><span className={`mr-1.5 h-1.5 w-1.5 rounded-full ${data.error ? 'bg-amber-300' : 'bg-emerald-300'}`} />{data.error ? '等待数据' : '接口已连接'}</Badge>
             <Button aria-label="查看通知" size="icon" variant="ghost" className="text-white/65 hover:bg-white/7 hover:text-white"><Bell className="h-[18px] w-[18px]" /></Button>
           </div>
         </div>
@@ -63,39 +55,43 @@ export default function Home() {
         <section className="min-w-0">
           <div className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
             <div>
-              <div className="mb-2 flex items-center gap-2 text-sm text-lime-300"><Activity className="h-4 w-4" />今日首版已生成</div>
-              <h1 className="text-2xl font-semibold tracking-[-0.035em] sm:text-[2rem]">今日比赛分析</h1>
-              <p className="mt-1.5 text-sm text-white/45">3 场重点观察 · 下次更新 18:30 · 开赛前 15 分钟冻结</p>
+              <div className="mb-2 flex items-center gap-2 text-sm text-lime-300"><Activity className="h-4 w-4" />真实赛程与基础预测</div>
+              <h1 className="text-2xl font-semibold tracking-[-0.035em] sm:text-[2rem]">未来 48 小时比赛分析</h1>
+              <p className="mt-1.5 text-sm text-white/45">{data.matches.length} 场重点观察 · 最近同步 {updatedAt} · 北京时间</p>
             </div>
-            <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[.035] px-3 py-2 text-sm text-white/65"><CalendarDays className="h-4 w-4 text-white/40" />今日<span className="text-white/25">·</span>北京时间</div>
+            <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[.035] px-3 py-2 text-sm text-white/65"><CalendarDays className="h-4 w-4 text-white/40" />今天与明天</div>
           </div>
 
-          <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-400/15 bg-sky-400/[.065] p-4 text-sm text-sky-100/75">
-            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-sky-300" />
-            <p><span className="font-medium text-sky-200">当前为界面演示数据。</span> 正式数据供应商接入并通过质量检查后，才会展示真实分析结果。</p>
+          <div className={`mb-5 flex items-start gap-3 rounded-2xl p-4 text-sm ${data.error ? 'border border-amber-400/15 bg-amber-400/[.065] text-amber-100/75' : 'border border-sky-400/15 bg-sky-400/[.065] text-sky-100/75'}`}>
+            <CircleAlert className={`mt-0.5 h-4 w-4 shrink-0 ${data.error ? 'text-amber-300' : 'text-sky-300'}`} />
+            <p>{data.error ? <><span className="font-medium">真实数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : <><span className="font-medium text-sky-200">演示数据已关闭。</span> 当前赛程与概率来自 API-Football，缓存可保护每日接口额度；这还是供应商基础预测，不代表最终自研模型。</>}</p>
           </div>
 
-          <div className="space-y-4">{matches.map((match) => <MatchCard key={`${match.home}-${match.away}`} match={match} />)}</div>
+          {data.matches.length ? (
+            <div className="space-y-4">{data.matches.map((match) => <MatchCard key={match.id} match={match} />)}</div>
+          ) : (
+            <Card className="border-white/8 bg-white/[.035] shadow-none"><CardContent className="py-14 text-center"><p className="text-white/70">当前没有可展示的未开赛重点比赛</p><p className="mt-2 text-sm text-white/35">数据源恢复或产生新赛程后会自动出现。</p></CardContent></Card>
+          )}
         </section>
 
         <aside className="space-y-4">
           <Card className="border-white/8 bg-white/[.035] shadow-none">
-            <CardHeader className="pb-3"><CardTitle className="flex items-center justify-between text-base font-medium">数据运行状态<span className="h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,.65)]" /></CardTitle></CardHeader>
+            <CardHeader className="pb-3"><CardTitle className="flex items-center justify-between text-base font-medium">数据运行状态<span className={`h-2 w-2 rounded-full ${data.error ? 'bg-amber-300' : 'bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,.65)]'}`} /></CardTitle></CardHeader>
             <CardContent className="space-y-4">
-              <StatusRow label="赛程数据" value="已更新" meta="2 分钟前" />
-              <StatusRow label="赔率快照" value="正常" meta="5 分钟前" />
-              <StatusRow label="伤停信息" value="待接入" meta="未配置" muted />
-              <StatusRow label="赛后复盘" value="已完成" meta="昨日 23 场" />
+              <StatusRow label="赛程数据" value={data.error ? '重试中' : '已导入'} meta={`更新于 ${updatedAt}`} muted={Boolean(data.error)} />
+              <StatusRow label="基础预测" value={predicted ? '已生成' : '等待中'} meta={`${predicted}/${data.matches.length} 场`} muted={!predicted} />
+              <StatusRow label="数据缓存" value="已启用" meta="赛程 30 分钟" />
+              <StatusRow label="伤停与赔率" value="待接入" meta="下一施工阶段" muted />
             </CardContent>
           </Card>
           <Card className="overflow-hidden border-lime-300/12 bg-[linear-gradient(145deg,rgba(190,242,100,.09),rgba(255,255,255,.025))] shadow-none">
             <CardContent className="p-5">
-              <div className="flex items-center justify-between"><p className="text-sm font-medium text-white/75">模型健康度</p><span className="text-xl font-semibold text-lime-300">82</span></div>
-              <Progress value={82} className="mt-3 h-1.5 bg-white/8 [&_[data-slot=progress-indicator]]:bg-lime-300" />
-              <p className="mt-3 text-xs leading-5 text-white/40">统计基线、球队强度与市场模型运行正常。机器学习模型尚未进入正式融合。</p>
+              <div className="flex items-center justify-between"><p className="text-sm font-medium text-white/75">预测数据覆盖</p><span className="text-xl font-semibold text-lime-300">{completeness}</span></div>
+              <Progress value={completeness} className="mt-3 h-1.5 bg-white/8 [&_[data-slot=progress-indicator]]:bg-lime-300" />
+              <p className="mt-3 text-xs leading-5 text-white/40">当前接入供应商基础概率；自研融合模型、回测和校准将在后续阶段上线。</p>
             </CardContent>
           </Card>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-1 xl:grid-cols-2"><Metric label="今日覆盖" value="3" unit="场" /><Metric label="数据完整度" value="91" unit="%" /></div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-1 xl:grid-cols-2"><Metric label="未来 48 小时" value={String(data.matches.length)} unit="场" /><Metric label="预测覆盖" value={String(completeness)} unit="%" /></div>
         </aside>
       </div>
 
@@ -106,22 +102,21 @@ export default function Home() {
   );
 }
 
-function MatchCard({ match }: { match: (typeof matches)[number] }) {
-  const [home, draw, away] = match.probabilities;
+function MatchCard({ match }: { match: DashboardMatch }) {
+  const [home, draw, away] = match.probabilities ?? [0, 0, 0];
   return (
     <Card className="group border-white/8 bg-white/[.035] py-0 shadow-none transition-colors hover:border-white/15 hover:bg-white/[.05]">
       <CardContent className="p-5 sm:p-6">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2 text-xs text-white/42"><span className="truncate">{match.league}</span><span>·</span><Clock3 className="h-3.5 w-3.5" /><span>{match.time}</span></div>
-          <Badge variant="outline" className={riskStyles[match.riskTone as keyof typeof riskStyles]}>{match.risk}</Badge>
+          <div className="flex min-w-0 items-center gap-2 text-xs text-white/42"><span className="truncate">{match.league}</span><span>·</span><span>{match.dateLabel}</span><Clock3 className="h-3.5 w-3.5" /><span>{match.time}</span></div>
+          <Badge variant="outline" className={riskStyles[match.riskTone]}>{match.risk}</Badge>
         </div>
         <div className="mt-5 grid items-center gap-5 sm:grid-cols-[minmax(170px,.8fr)_minmax(280px,1.2fr)_auto]">
-          <div><div className="flex items-center gap-3 text-lg font-semibold tracking-tight"><span>{match.home}</span><span className="text-sm font-normal text-white/25">vs</span><span>{match.away}</span></div><p className="mt-1 text-xs text-white/35">预计总进球 {match.goals} · 可信度 {match.confidence}%</p></div>
+          <div><div className="flex items-center gap-3 text-lg font-semibold tracking-tight"><span>{match.home}</span><span className="text-sm font-normal text-white/25">vs</span><span>{match.away}</span></div><p className="mt-1 text-xs text-white/35">总进球 {match.goals} · {match.confidence === null ? '等待概率' : `最高概率 ${match.confidence}%`}</p></div>
           <div>
-            <div className="mb-2 flex justify-between text-xs text-white/45"><span>主胜 <b className="ml-1 font-semibold text-white/85">{home}%</b></span><span>平局 <b className="ml-1 font-semibold text-white/85">{draw}%</b></span><span>客胜 <b className="ml-1 font-semibold text-white/85">{away}%</b></span></div>
-            <div className="flex h-2 overflow-hidden rounded-full bg-white/5"><span className="bg-lime-300" style={{ width: `${home}%` }} /><span className="bg-sky-400" style={{ width: `${draw}%` }} /><span className="bg-violet-400" style={{ width: `${away}%` }} /></div>
+            {match.probabilities ? <><div className="mb-2 flex justify-between text-xs text-white/45"><span>主胜 <b className="ml-1 font-semibold text-white/85">{home}%</b></span><span>平局 <b className="ml-1 font-semibold text-white/85">{draw}%</b></span><span>客胜 <b className="ml-1 font-semibold text-white/85">{away}%</b></span></div><div className="flex h-2 overflow-hidden rounded-full bg-white/5"><span className="bg-lime-300" style={{ width: `${home}%` }} /><span className="bg-sky-400" style={{ width: `${draw}%` }} /><span className="bg-violet-400" style={{ width: `${away}%` }} /></div></> : <p className="text-sm text-white/35">预测数据等待下一次同步</p>}
           </div>
-          <Button variant="ghost" size="sm" className="justify-self-start text-white/60 hover:bg-white/7 hover:text-white sm:justify-self-end">查看分析 <ChevronRight className="h-4 w-4" /></Button>
+          <Button variant="ghost" size="sm" className="justify-self-start text-white/60 hover:bg-white/7 hover:text-white sm:justify-self-end">分析摘要 <ChevronRight className="h-4 w-4" /></Button>
         </div>
         <p className="mt-4 border-t border-white/7 pt-4 text-sm leading-6 text-white/48">{match.note}</p>
       </CardContent>
