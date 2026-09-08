@@ -11,6 +11,7 @@
 - 原始响应压缩留存 90 天，便于复核
 - 生成 `latest.json` 和 `health.json`
 - systemd 开机自启、定时执行、阻止重复运行
+- 只读数据接口使用 HMAC-SHA256 签名，网站会拒绝伪造或过期数据
 - 不需要 API-Football 密钥，不在 GitHub 保存任何密码或私钥
 
 ## Ubuntu 22.04 安装
@@ -28,6 +29,8 @@ sudo systemctl status football-ai-collector.service
 sudo journalctl -u football-ai-collector.service -n 50 --no-pager
 sudo cat /var/lib/football-ai/health.json
 ```
+
+只读接口为 `http://服务器地址/api/latest` 和 `/api/health`。接口内容虽然是公开赛事资料，但网站仍会校验服务器签名，签名密钥不会进入 GitHub 或浏览器。
 
 数据文件位于 `/var/lib/football-ai/`，程序安装在 `/opt/football-ai/collector/`。
 

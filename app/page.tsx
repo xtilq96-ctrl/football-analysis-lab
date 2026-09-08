@@ -22,6 +22,9 @@ export default async function Home() {
   const predicted = data.matches.filter((match) => match.probabilities).length;
   const withOdds = data.matches.filter((match) => match.marketProbabilities).length;
   const completeness = data.matches.length ? Math.round((predicted / data.matches.length) * 100) : 0;
+  const numberRange = data.matches.length
+    ? `${data.matches[0].officialNumber}–${data.matches[data.matches.length - 1].officialNumber.slice(-3)}`
+    : '暂无场次';
 
   return (
     <main className="min-h-screen bg-background pb-20 text-foreground lg:pb-0">
@@ -58,14 +61,14 @@ export default async function Home() {
             <div>
               <div className="mb-2 flex items-center gap-2 text-sm text-lime-300"><Activity className="h-4 w-4" />中国体彩官方竞彩赛程</div>
               <h1 className="text-2xl font-semibold tracking-[-0.035em] sm:text-[2rem]">今日竞彩足球</h1>
-              <p className="mt-1.5 text-sm text-white/45">{data.businessDate} · 周二001–012 · 共 {data.matches.length} 场 · 最近同步 {updatedAt}</p>
+              <p className="mt-1.5 text-sm text-white/45">{data.businessDate} · {numberRange} · 共 {data.matches.length} 场 · 最近同步 {updatedAt}</p>
             </div>
             <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[.035] px-3 py-2 text-sm text-white/65"><CalendarDays className="h-4 w-4 text-white/40" />体彩业务日</div>
           </div>
 
           <div className={`mb-5 flex items-start gap-3 rounded-2xl p-4 text-sm ${data.error ? 'border border-amber-400/15 bg-amber-400/[.065] text-amber-100/75' : 'border border-sky-400/15 bg-sky-400/[.065] text-sky-100/75'}`}>
             <CircleAlert className={`mt-0.5 h-4 w-4 shrink-0 ${data.error ? 'text-amber-300' : 'text-sky-300'}`} />
-            <p>{data.error ? <><span className="font-medium">官方数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : data.sourceMode === 'verified_snapshot' ? <><span className="font-medium text-sky-200">已显示官方核验快照。</span> 海外云端被体彩接口拦截，当前为本机从官方接口核验的今日12场数据；部署大陆采集节点后才能自动刷新。</> : <><span className="font-medium text-sky-200">数据口径已纠正。</span> 场次编号、对阵、开赛时间、胜平负及让球固定奖均来自中国体育彩票官方公开接口；概率由官方固定奖去水换算。</>}</p>
+            <p>{data.error ? <><span className="font-medium">官方数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : data.sourceMode === 'verified_snapshot' ? <><span className="font-medium text-sky-200">已显示官方核验快照。</span> 自动采集数据暂时不可用，页面会继续重试。</> : data.sourceMode === 'mainland_relay' ? <><span className="font-medium text-sky-200">南京采集节点运行正常。</span> 每5分钟读取中国体育彩票官方数据并校验签名，已开赛场次与赔率变化持续留存。</> : <><span className="font-medium text-sky-200">官方数据已连接。</span> 场次、时间和固定奖来自中国体育彩票公开接口；概率由官方固定奖去水换算。</>}</p>
           </div>
 
           {data.matches.length ? (
@@ -82,7 +85,7 @@ export default async function Home() {
               <StatusRow label="体彩官方赛程" value={data.error ? '重试中' : '已导入'} meta={`${data.matches.length} 场 · ${updatedAt}`} muted={Boolean(data.error)} />
               <StatusRow label="官方固定奖" value={withOdds ? '已接入' : '等待中'} meta={`${withOdds}/${data.matches.length} 场`} muted={!withOdds} />
               <StatusRow label="去水概率" value={predicted ? '已生成' : '等待中'} meta={`${predicted}/${data.matches.length} 场`} muted={!predicted} />
-              <StatusRow label="数据模式" value={data.sourceMode === 'live' ? '官方实时' : '官方快照'} meta={data.sourceMode === 'live' ? '缓存 5 分钟' : '待部署大陆节点'} muted={data.sourceMode !== 'live'} />
+              <StatusRow label="数据模式" value={data.sourceMode === 'mainland_relay' ? '大陆自动采集' : data.sourceMode === 'live' ? '官方直连' : '官方快照'} meta={data.sourceMode === 'mainland_relay' ? '每 5 分钟更新' : data.sourceMode === 'live' ? '实时读取' : '自动恢复中'} muted={data.sourceMode === 'verified_snapshot'} />
             </CardContent>
           </Card>
           <Card className="overflow-hidden border-lime-300/12 bg-[linear-gradient(145deg,rgba(190,242,100,.09),rgba(255,255,255,.025))] shadow-none">

@@ -19,6 +19,28 @@ type SportteryMatch = {
   hhad?: Odds;
 };
 type SportteryEnvelope = { success: boolean; errorCode: string; value?: { matchInfoList?: Array<{ businessDate: string; subMatchList: SportteryMatch[] }> } };
+type RelayMatch = {
+  matchId: string;
+  businessDate: string;
+  officialNumber: string;
+  matchNumber: number;
+  league: string;
+  home: string;
+  away: string;
+  kickoffDate: string;
+  kickoffTime: string;
+  saleStatus: string;
+  had?: Odds;
+  hhad?: Odds;
+};
+type RelayPayload = {
+  source: string;
+  businessDate: string;
+  businessDates?: string[];
+  updatedAt: string;
+  count: number;
+  matches: RelayMatch[];
+};
 
 const VERIFIED_SNAPSHOT_2026_09_08: SportteryMatch[] = [
   { matchId: 2041345, matchNum: 2001, matchNumStr: '周二001', matchWeek: '周二', businessDate: '2026-09-08', matchDate: '2026-09-08', matchTime: '18:30:00', leagueAllName: '韩国职业联赛', homeTeamAllName: '蔚山现代', awayTeamAllName: '首尔FC', sellStatus: '1', had: { h: '3.29', d: '3.58', a: '1.83', updateDate: '2026-09-08', updateTime: '15:49:37' }, hhad: { h: '1.74', d: '3.80', a: '3.43', goalLine: '+1' } },
@@ -59,7 +81,7 @@ export type DashboardMatch = {
   saleStatus: string;
 };
 
-export type DashboardData = { matches: DashboardMatch[]; updatedAt: string; businessDate: string; sourceMode: 'live' | 'verified_snapshot'; error?: string };
+export type DashboardData = { matches: DashboardMatch[]; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
 
 function shanghaiDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -103,6 +125,53 @@ async function getSportteryData(): Promise<SportteryEnvelope> {
   }
 }
 
+function fromHex(value: string) {
+  if (!/^[0-9a-f]{64}$/i.test(value)) return null;
+  return Uint8Array.from(value.match(/.{2}/g) ?? [], (byte) => Number.parseInt(byte, 16));
+}
+
+async function verifiedRelayData(): Promise<RelayPayload> {
+  const relayUrl = env.FOOTBALL_AI_RELAY_URL;
+  const relaySecret = env.FOOTBALL_AI_RELAY_SECRET;
+  if (!relayUrl || !relaySecret) throw new Error('大陆采集节点尚未配置');
+  const response = await fetch(relayUrl, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+  if (!response.ok) throw new Error(`大陆采集节点返回 ${response.status}`);
+  const body = await response.text();
+  const signature = fromHex(response.headers.get('X-Football-Signature') ?? '');
+  if (!signature) throw new Error('大陆采集节点签名缺失');
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(relaySecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'],
+  );
+  const valid = await crypto.subtle.verify('HMAC', key, signature, new TextEncoder().encode(body));
+  if (!valid) throw new Error('大陆采集节点签名校验失败');
+  const payload = JSON.parse(body) as RelayPayload;
+  if (!payload.updatedAt || !payload.businessDate || !Array.isArray(payload.matches) || payload.count !== payload.matches.length) {
+    throw new Error('大陆采集节点数据结构异常');
+  }
+  const age = Date.now() - Date.parse(payload.updatedAt);
+  if (!Number.isFinite(age) || age < -5 * 60_000 || age > 20 * 60_000) throw new Error('大陆采集节点数据已过期');
+  return payload;
+}
+
+function relayMatch(item: RelayMatch): SportteryMatch {
+  const suffix = item.officialNumber.slice(-3);
+  return {
+    matchId: Number(item.matchId),
+    matchNum: item.matchNumber || Number(suffix),
+    matchNumStr: item.officialNumber,
+    matchWeek: item.officialNumber.slice(0, -3),
+    businessDate: item.businessDate,
+    matchDate: item.kickoffDate,
+    matchTime: item.kickoffTime,
+    leagueAllName: item.league,
+    homeTeamAllName: item.home,
+    awayTeamAllName: item.away,
+    sellStatus: item.saleStatus,
+    had: item.had,
+    hhad: item.hhad,
+  };
+}
+
 function parseOdds(odds?: Odds): [number, number, number] | null {
   const values = [Number(odds?.h), Number(odds?.d), Number(odds?.a)] as [number, number, number];
   return values.every((value) => Number.isFinite(value) && value > 1) ? values : null;
@@ -132,18 +201,32 @@ function officialNumber(match: SportteryMatch) {
 }
 
 export async function getDashboardData(): Promise<DashboardData> {
-  const businessDate = shanghaiDate();
-  let sourceMode: DashboardData['sourceMode'] = 'live';
+  let businessDate = shanghaiDate();
+  let updatedAt = new Date().toISOString();
+  let sourceMode: DashboardData['sourceMode'] = 'mainland_relay';
   try {
     let source: SportteryMatch[] = [];
     try {
-      const payload = await getSportteryData();
-      const group = payload.value?.matchInfoList?.find((item) => item.businessDate === businessDate);
-      source = group?.subMatchList ?? [];
+      const relay = await verifiedRelayData();
+      businessDate = relay.businessDate;
+      updatedAt = relay.updatedAt;
+      source = relay.matches.filter((item) => item.businessDate === businessDate).map(relayMatch);
+      if (businessDate === '2026-09-08') {
+        const merged = new Map(VERIFIED_SNAPSHOT_2026_09_08.map((item) => [item.matchId, item]));
+        source.forEach((item) => merged.set(item.matchId, item));
+        source = [...merged.values()];
+      }
     } catch {
-      if (businessDate !== '2026-09-08') throw new Error('大陆体彩采集节点尚未部署');
-      source = VERIFIED_SNAPSHOT_2026_09_08;
-      sourceMode = 'verified_snapshot';
+      try {
+        const payload = await getSportteryData();
+        const group = payload.value?.matchInfoList?.find((item) => item.businessDate === businessDate);
+        source = group?.subMatchList ?? [];
+        sourceMode = 'live';
+      } catch {
+        if (businessDate !== '2026-09-08') throw new Error('大陆体彩采集节点暂时不可用');
+        source = VERIFIED_SNAPSHOT_2026_09_08;
+        sourceMode = 'verified_snapshot';
+      }
     }
     const matches = source.sort((a, b) => a.matchNum - b.matchNum).map((item): DashboardMatch => {
       const had = parseOdds(item.had);
@@ -176,8 +259,8 @@ export async function getDashboardData(): Promise<DashboardData> {
         saleStatus: item.sellStatus,
       };
     });
-    return { matches, updatedAt: new Date().toISOString(), businessDate, sourceMode };
+    return { matches, updatedAt, businessDate, sourceMode };
   } catch (error) {
-    return { matches: [], updatedAt: new Date().toISOString(), businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
+    return { matches: [], updatedAt, businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
   }
 }
