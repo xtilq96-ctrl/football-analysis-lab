@@ -18,6 +18,9 @@ fi
 install -d -o root -g root -m 0755 "${INSTALL_DIR}" "${INSTALL_DIR}/collector"
 install -d -o football-ai -g football-ai -m 0750 "${DATA_DIR}"
 install -d -o root -g football-ai -m 0750 "${CONFIG_DIR}"
+if [[ ! -e "${CONFIG_DIR}/collector.env" ]]; then
+  install -o root -g football-ai -m 0640 /dev/null "${CONFIG_DIR}/collector.env"
+fi
 install -o root -g root -m 0755 "${SOURCE_DIR}/collector/collector.py" "${INSTALL_DIR}/collector/collector.py"
 install -o root -g root -m 0755 "${SOURCE_DIR}/collector/api_server.py" "${INSTALL_DIR}/collector/api_server.py"
 install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-collector.service" /etc/systemd/system/football-ai-collector.service

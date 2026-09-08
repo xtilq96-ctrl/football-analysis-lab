@@ -5,6 +5,8 @@ const SPORTTERY_URL = 'https://webapi.sporttery.cn/gateway/uniform/football/getM
 type Odds = { h?: string; d?: string; a?: string; goalLine?: string; updateDate?: string; updateTime?: string };
 type ModelAnalysis = {
   modelVersion?: string;
+  probabilities?: { home: number; draw: number; away: number };
+  marketProbabilities?: { home: number; draw: number; away: number };
   predictedScore?: string;
   scoreProbabilities?: Array<{ score: string; probability: number }>;
   predictedTotalGoals?: string;
@@ -12,6 +14,32 @@ type ModelAnalysis = {
   under25Probability?: number;
   over25Probability?: number;
   expectedGoals?: { home: number; away: number; total: number };
+};
+type TeamForm = {
+  matches: number; wins: number; draws: number; losses: number;
+  pointsPerGame: number | null; goalsForPerGame: number | null;
+  goalsAgainstPerGame: number | null; cleanSheetRate: number | null;
+  form: string; restDays: number | null; matchesLast14Days: number;
+  venue: { matches: number; pointsPerGame: number | null; goalsForPerGame: number | null; goalsAgainstPerGame: number | null };
+};
+type TeamFundamentals = {
+  apiName: string;
+  form: TeamForm;
+  absences: { total: number; injuries: number; suspensions: number; players: Array<{ name: string; reason: string }> };
+  lineup: { confirmed: boolean; formation?: string | null; startingCount: number };
+};
+type Fundamentals = {
+  status: 'ready' | 'partial' | 'unmatched' | 'not_configured' | 'api_error';
+  coverage: number;
+  mappingConfidence?: number;
+  message?: string;
+  home?: TeamFundamentals;
+  away?: TeamFundamentals;
+  probabilityAdjustmentPoints?: { home: number; draw: number; away: number };
+};
+type AnalysisSchedule = {
+  phase: string; isLocked: boolean; isEarlyMatch: boolean;
+  finalAnalysisAt: string; lockAt: string; minutesToKickoff: number | null;
 };
 type MatchResult = {
   fullTimeScore: string;
@@ -56,6 +84,8 @@ type SportteryMatch = {
   analysis?: ModelAnalysis;
   result?: MatchResult;
   settlement?: MatchSettlement;
+  fundamentals?: Fundamentals;
+  analysisSchedule?: AnalysisSchedule;
 };
 type SportteryEnvelope = { success: boolean; errorCode: string; value?: { matchInfoList?: Array<{ businessDate: string; subMatchList: SportteryMatch[] }> } };
 type RelayMatch = {
@@ -74,6 +104,8 @@ type RelayMatch = {
   analysis?: ModelAnalysis;
   result?: MatchResult;
   settlement?: MatchSettlement;
+  fundamentals?: Fundamentals;
+  analysisSchedule?: AnalysisSchedule;
 };
 export type DashboardRecommendation = {
   level: string;
@@ -152,6 +184,8 @@ export type DashboardMatch = {
   over25Probability: number | null;
   under25Probability: number | null;
   expectedGoals: { home: number; away: number; total: number } | null;
+  fundamentals: Fundamentals | null;
+  analysisSchedule: AnalysisSchedule | null;
   result: MatchResult | null;
   settlement: MatchSettlement | null;
 };
@@ -247,6 +281,8 @@ function relayMatch(item: RelayMatch): SportteryMatch {
     analysis: item.analysis,
     result: item.result,
     settlement: item.settlement,
+    fundamentals: item.fundamentals,
+    analysisSchedule: item.analysisSchedule,
   };
 }
 
@@ -314,7 +350,10 @@ export async function getDashboardData(): Promise<DashboardData> {
       const had = parseOdds(item.had);
       const hhad = parseOdds(item.hhad);
       const market = deVig(had);
-      const probabilities = market?.probabilities ?? null;
+      const modelProbabilities = item.analysis?.probabilities;
+      const probabilities = modelProbabilities
+        ? [modelProbabilities.home, modelProbabilities.draw, modelProbabilities.away] as [number, number, number]
+        : market?.probabilities ?? null;
       const labels = ['主胜', '平局', '客胜'];
       const strongest = probabilities ? probabilities.indexOf(Math.max(...probabilities)) : -1;
       const updateAt = item.had?.updateTime ? `${item.had.updateTime.slice(0, 5)} 更新` : '等待更新';
@@ -328,7 +367,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         away: item.awayTeamAllName,
         probabilities,
         providerProbabilities: null,
-        marketProbabilities: probabilities,
+        marketProbabilities: market?.probabilities ?? null,
         averageOdds: had,
         handicapOdds: hhad,
         handicapLine: item.hhad?.goalLine || null,
@@ -337,7 +376,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         goals: hhad?.length ? `让球 ${item.hhad?.goalLine || '0'}` : '让球待公布',
         confidence: probabilities ? Math.max(...probabilities) : null,
         ...riskFor(probabilities),
-        note: probabilities ? `体彩官方胜平负固定奖去水后偏向${labels[strongest]}，${updateAt}。当前仅表示市场概率，不是投注保证。` : '体彩官方赛程已导入，胜平负固定奖尚未公布或暂停售。',
+        note: probabilities ? `${item.analysis?.modelVersion === 'v2-market-fundamentals' ? 'V2 已综合近期状态、主客场、攻防、赛程与人员信息' : '当前使用体彩市场概率'}，结果偏向${labels[strongest]}，${updateAt}。概率分析不代表结果保证。` : '体彩官方赛程已导入，胜平负固定奖尚未公布或暂停售。',
         saleStatus: item.sellStatus,
         predictedScore: item.analysis?.predictedScore ?? null,
         scoreProbabilities: item.analysis?.scoreProbabilities ?? [],
@@ -346,6 +385,8 @@ export async function getDashboardData(): Promise<DashboardData> {
         over25Probability: item.analysis?.over25Probability ?? null,
         under25Probability: item.analysis?.under25Probability ?? null,
         expectedGoals: item.analysis?.expectedGoals ?? null,
+        fundamentals: item.fundamentals ?? null,
+        analysisSchedule: item.analysisSchedule ?? null,
         result: item.result ?? null,
         settlement: item.settlement ?? null,
       };

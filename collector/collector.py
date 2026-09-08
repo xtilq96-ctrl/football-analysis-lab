@@ -17,14 +17,17 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -41,6 +44,7 @@ SPORTTERY_URL = (
 SPORTTERY_RESULTS_URL = (
     "https://webapi.sporttery.cn/gateway/uniform/football/getUniformMatchResultV1.qry"
 )
+API_FOOTBALL_URL = "https://v3.football.api-sports.io"
 SHANGHAI = timezone(timedelta(hours=8))
 HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -130,6 +134,118 @@ def fetch_results(timeout: float, retries: int = 3) -> list[dict[str, Any]]:
             if attempt < retries:
                 time.sleep(2 ** (attempt - 1))
     raise RuntimeError(f"result fetch failed after {retries} attempts: {last_error}")
+
+
+def api_football_request(
+    connection: sqlite3.Connection,
+    api_key: str,
+    endpoint: str,
+    params: dict[str, Any],
+    ttl: timedelta,
+    timeout: float,
+    retries: int,
+) -> list[dict[str, Any]]:
+    """Fetch one API-Football resource with a persistent, quota-friendly cache."""
+    normalized_params = {key: str(value) for key, value in params.items() if value not in (None, "")}
+    query = urllib.parse.urlencode(sorted(normalized_params.items()))
+    cache_key = f"api-football:{endpoint}?{query}"
+    now = datetime.now(timezone.utc)
+    cached = connection.execute(
+        "SELECT payload,expires_at FROM api_cache WHERE cache_key=?", (cache_key,)
+    ).fetchone()
+    if cached:
+        with contextlib.suppress(ValueError):
+            if datetime.fromisoformat(cached[1]) > now:
+                payload = json.loads(cached[0])
+                return payload if isinstance(payload, list) else []
+
+    last_error: Exception | None = None
+    url = f"{API_FOOTBALL_URL}/{endpoint}"
+    if query:
+        url = f"{url}?{query}"
+    for attempt in range(1, retries + 1):
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": HEADERS["User-Agent"],
+                    "x-apisports-key": api_key,
+                },
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read())
+            errors = payload.get("errors")
+            if errors and errors not in ({}, []):
+                category = next(iter(errors), "request") if isinstance(errors, dict) else "request"
+                raise RuntimeError(f"API-Football {category} error for {endpoint}")
+            items = payload.get("response", [])
+            if not isinstance(items, list):
+                raise RuntimeError(f"API-Football returned an unexpected {endpoint} payload")
+            serialized = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
+            with connection:
+                connection.execute(
+                    """INSERT INTO api_cache(cache_key,payload,fetched_at,expires_at)
+                       VALUES (?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET
+                       payload=excluded.payload,fetched_at=excluded.fetched_at,
+                       expires_at=excluded.expires_at""",
+                    (cache_key, serialized, now.isoformat(), (now + ttl).isoformat()),
+                )
+            return items
+        except (OSError, ValueError, urllib.error.URLError, RuntimeError) as error:
+            last_error = error
+            if attempt < retries:
+                time.sleep(2 ** (attempt - 1))
+    if cached:
+        logging.warning("using stale API-Football cache for %s: %s", endpoint, last_error)
+        payload = json.loads(cached[0])
+        return payload if isinstance(payload, list) else []
+    raise RuntimeError(f"API-Football fetch failed for {endpoint}: {last_error}")
+
+
+def parse_kickoff(match: dict[str, Any]) -> datetime | None:
+    value = f"{match.get('kickoffDate') or match.get('matchDate') or ''}T{match.get('kickoffTime') or match.get('matchTime') or ''}"
+    with contextlib.suppress(ValueError):
+        return datetime.fromisoformat(value).replace(tzinfo=SHANGHAI)
+    return None
+
+
+def analysis_schedule(match: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """Create an early-match aware finalization and lock schedule in China time."""
+    current = now or now_shanghai()
+    kickoff = parse_kickoff(match)
+    business_date_text = str(match.get("businessDate") or "")
+    try:
+        business_date = datetime.fromisoformat(business_date_text).replace(tzinfo=SHANGHAI)
+    except ValueError:
+        business_date = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    global_final = business_date.replace(hour=20, minute=50)
+    global_lock = business_date.replace(hour=21, minute=0)
+    if kickoff is None:
+        return {
+            "phase": "时间待确认", "isLocked": False, "isEarlyMatch": False,
+            "finalAnalysisAt": global_final.isoformat(), "lockAt": global_lock.isoformat(),
+            "minutesToKickoff": None,
+        }
+    final_at = min(kickoff - timedelta(minutes=90), global_final)
+    lock_at = min(kickoff - timedelta(minutes=60), global_lock)
+    minutes = int((kickoff - current).total_seconds() // 60)
+    if current >= kickoff:
+        phase = "已开赛"
+    elif current >= lock_at:
+        phase = "最终锁定"
+    elif current >= final_at:
+        phase = "最终分析"
+    else:
+        phase = "持续更新"
+    return {
+        "phase": phase,
+        "isLocked": current >= lock_at,
+        "isEarlyMatch": kickoff.time() < datetime.strptime("21:00", "%H:%M").time(),
+        "finalAnalysisAt": final_at.isoformat(),
+        "lockAt": lock_at.isoformat(),
+        "minutesToKickoff": minutes,
+    }
 
 
 def flatten_matches(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -260,6 +376,210 @@ def market_analysis(match: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def compact_name(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]", "", normalized.lower())
+
+
+def name_acronym(value: Any) -> str:
+    words = re.findall(r"[a-z0-9]+", unicodedata.normalize("NFKD", str(value or "")).lower())
+    return "".join(word[0] for word in words if word and word not in {"fc", "cf", "sc", "club"})
+
+
+def team_name_similarity(hints: Iterable[Any], api_name: Any) -> float:
+    target = compact_name(api_name)
+    acronym = name_acronym(api_name)
+    best = 0.0
+    for hint_value in hints:
+        hint = compact_name(hint_value)
+        if not hint:
+            continue
+        if hint == target or hint == acronym:
+            return 1.0
+        if len(hint) >= 3 and (hint in target or target in hint):
+            best = max(best, 0.9)
+        if len(hint) >= 2 and acronym and (hint == acronym or hint in acronym):
+            best = max(best, 0.82)
+        best = max(best, SequenceMatcher(None, hint, target).ratio())
+    return best
+
+
+def match_api_fixture(match: dict[str, Any], fixtures: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, float]:
+    kickoff = parse_kickoff(match)
+    if kickoff is None:
+        return None, 0.0
+    home_hints = (match.get("homeTeamCode"), match.get("homeTeamEn"), match.get("home"))
+    away_hints = (match.get("awayTeamCode"), match.get("awayTeamEn"), match.get("away"))
+    best_fixture: dict[str, Any] | None = None
+    best_score = 0.0
+    for fixture in fixtures:
+        timestamp = (fixture.get("fixture") or {}).get("timestamp")
+        try:
+            api_kickoff = datetime.fromtimestamp(int(timestamp), timezone.utc).astimezone(SHANGHAI)
+        except (TypeError, ValueError, OSError):
+            continue
+        difference = abs((api_kickoff - kickoff).total_seconds())
+        if difference > 20 * 60:
+            continue
+        teams = fixture.get("teams") or {}
+        home_score = team_name_similarity(home_hints, (teams.get("home") or {}).get("name"))
+        away_score = team_name_similarity(away_hints, (teams.get("away") or {}).get("name"))
+        time_score = max(0.0, 1 - difference / (20 * 60))
+        score = time_score * 0.55 + home_score * 0.225 + away_score * 0.225
+        if score > best_score:
+            best_fixture, best_score = fixture, score
+    return (best_fixture, round(best_score, 3)) if best_score >= 0.72 else (None, round(best_score, 3))
+
+
+def team_form_summary(fixtures: list[dict[str, Any]], team_id: int, venue: str, kickoff: datetime) -> dict[str, Any]:
+    completed: list[dict[str, Any]] = []
+    for item in fixtures:
+        fixture = item.get("fixture") or {}
+        status = (fixture.get("status") or {}).get("short")
+        timestamp = fixture.get("timestamp")
+        if status not in {"FT", "AET", "PEN"} or timestamp is None:
+            continue
+        played_at = datetime.fromtimestamp(int(timestamp), timezone.utc).astimezone(SHANGHAI)
+        if played_at >= kickoff:
+            continue
+        item = dict(item)
+        item["_playedAt"] = played_at
+        completed.append(item)
+    completed.sort(key=lambda item: item["_playedAt"], reverse=True)
+    recent = completed[:10]
+    venue_games = [
+        item for item in recent
+        if int((((item.get("teams") or {}).get(venue) or {}).get("id") or 0)) == team_id
+    ][:5]
+
+    def calculate(items: list[dict[str, Any]]) -> dict[str, Any]:
+        wins = draws = losses = goals_for = goals_against = clean_sheets = 0
+        form: list[str] = []
+        for item in items:
+            teams = item.get("teams") or {}
+            goals = item.get("goals") or {}
+            is_home = int(((teams.get("home") or {}).get("id") or 0)) == team_id
+            scored = int(goals.get("home") or 0) if is_home else int(goals.get("away") or 0)
+            conceded = int(goals.get("away") or 0) if is_home else int(goals.get("home") or 0)
+            goals_for += scored
+            goals_against += conceded
+            clean_sheets += int(conceded == 0)
+            if scored > conceded:
+                wins += 1
+                form.append("W")
+            elif scored == conceded:
+                draws += 1
+                form.append("D")
+            else:
+                losses += 1
+                form.append("L")
+        games = len(items)
+        return {
+            "matches": games, "wins": wins, "draws": draws, "losses": losses,
+            "pointsPerGame": round((wins * 3 + draws) / games, 2) if games else None,
+            "goalsForPerGame": round(goals_for / games, 2) if games else None,
+            "goalsAgainstPerGame": round(goals_against / games, 2) if games else None,
+            "cleanSheetRate": round(clean_sheets / games * 100, 1) if games else None,
+            "form": "".join(form),
+        }
+
+    summary = calculate(recent)
+    summary["venue"] = calculate(venue_games)
+    if recent:
+        rest_days = max(0.0, (kickoff - recent[0]["_playedAt"]).total_seconds() / 86400)
+        summary["restDays"] = round(rest_days, 1)
+    else:
+        summary["restDays"] = None
+    summary["matchesLast14Days"] = sum(
+        1 for item in completed if timedelta(0) <= kickoff - item["_playedAt"] <= timedelta(days=14)
+    )
+    return summary
+
+
+def form_strength(summary: dict[str, Any]) -> float:
+    if not summary.get("matches"):
+        return 0.0
+    ppg = float(summary.get("pointsPerGame") or 0)
+    goal_difference = float(summary.get("goalsForPerGame") or 0) - float(summary.get("goalsAgainstPerGame") or 0)
+    clean = float(summary.get("cleanSheetRate") or 0) / 100
+    base = ((ppg - 1.5) / 1.5) * 0.45 + math.tanh(goal_difference / 1.5) * 0.35 + (clean - 0.3) * 0.2
+    venue = summary.get("venue") or {}
+    if venue.get("matches"):
+        venue_ppg = float(venue.get("pointsPerGame") or 0)
+        venue_goal_difference = float(venue.get("goalsForPerGame") or 0) - float(venue.get("goalsAgainstPerGame") or 0)
+        venue_score = ((venue_ppg - 1.5) / 1.5) * 0.6 + math.tanh(venue_goal_difference / 1.5) * 0.4
+        base = base * 0.7 + venue_score * 0.3
+    return max(-1.0, min(1.0, base))
+
+
+def absence_summary(items: list[dict[str, Any]], fixture_id: int, team_id: int) -> dict[str, Any]:
+    selected = [
+        item for item in items
+        if int(((item.get("fixture") or {}).get("id") or 0)) == fixture_id
+        and int(((item.get("team") or {}).get("id") or 0)) == team_id
+    ]
+    suspension_words = ("suspend", "red card", "yellow card", "disciplin")
+    suspensions = sum(
+        1 for item in selected
+        if any(word in str((item.get("player") or {}).get("reason") or "").lower() for word in suspension_words)
+    )
+    return {
+        "total": len(selected),
+        "injuries": len(selected) - suspensions,
+        "suspensions": suspensions,
+        "players": [
+            {
+                "name": str((item.get("player") or {}).get("name") or ""),
+                "reason": str((item.get("player") or {}).get("reason") or "未说明"),
+            }
+            for item in selected[:8]
+        ],
+    }
+
+
+def blend_fundamentals(base: dict[str, Any], fundamentals: dict[str, Any]) -> dict[str, Any]:
+    market = base.get("probabilities")
+    if not isinstance(market, dict) or fundamentals.get("status") not in {"partial", "ready"}:
+        return base
+    home = fundamentals["home"]
+    away = fundamentals["away"]
+    delta = (form_strength(home["form"]) - form_strength(away["form"])) * 0.55
+    home_rest = home["form"].get("restDays")
+    away_rest = away["form"].get("restDays")
+    if home_rest is not None and home_rest < 4:
+        delta -= 0.05
+    if away_rest is not None and away_rest < 4:
+        delta += 0.05
+    delta += min(0.10, away["absences"]["injuries"] * 0.015 + away["absences"]["suspensions"] * 0.025)
+    delta -= min(0.10, home["absences"]["injuries"] * 0.015 + home["absences"]["suspensions"] * 0.025)
+    delta = max(-0.28, min(0.28, delta))
+    weighted = [
+        float(market["home"]) * math.exp(delta),
+        float(market["draw"]) * math.exp(-abs(delta) * 0.12),
+        float(market["away"]) * math.exp(-delta),
+    ]
+    total = sum(weighted)
+    values = [round(value / total * 100, 2) for value in weighted]
+    labels = ["主胜", "平局", "客胜"]
+    ordered = sorted(values, reverse=True)
+    gap = ordered[0] - ordered[1]
+    fundamentals["probabilityAdjustmentPoints"] = {
+        "home": round(values[0] - float(market["home"]), 2),
+        "draw": round(values[1] - float(market["draw"]), 2),
+        "away": round(values[2] - float(market["away"]), 2),
+    }
+    return {
+        **base,
+        **score_model(values),
+        "modelVersion": "v2-market-fundamentals",
+        "marketProbabilities": market,
+        "probabilities": dict(zip(("home", "draw", "away"), values)),
+        "prediction": labels[values.index(max(values))],
+        "confidence": round(max(values), 2),
+        "risk": "低风险" if gap >= 25 else "中风险" if gap >= 12 else "高风险",
+    }
+
+
 def build_recommendations(matches: list[dict[str, Any]], business_dates: list[str]) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {}
     pick_key = {"主胜": "h", "平局": "d", "客胜": "a"}
@@ -267,6 +587,8 @@ def build_recommendations(matches: list[dict[str, Any]], business_dates: list[st
         candidates: list[dict[str, Any]] = []
         for item in matches:
             if item.get("businessDate") != business_date:
+                continue
+            if (item.get("analysisSchedule") or {}).get("phase") == "已开赛":
                 continue
             analysis = item.get("analysis") or {}
             prediction = analysis.get("prediction")
@@ -322,7 +644,7 @@ def official_number(match: dict[str, Any]) -> str:
 
 
 def normalized(match: dict[str, Any], collected_at: str) -> dict[str, Any]:
-    return {
+    item = {
         "matchId": str(match["matchId"]),
         "businessDate": str(match.get("businessDate") or ""),
         "officialNumber": official_number(match),
@@ -330,6 +652,10 @@ def normalized(match: dict[str, Any], collected_at: str) -> dict[str, Any]:
         "league": str(match.get("leagueAllName") or ""),
         "home": str(match.get("homeTeamAllName") or ""),
         "away": str(match.get("awayTeamAllName") or ""),
+        "homeTeamCode": str(match.get("homeTeamCode") or ""),
+        "awayTeamCode": str(match.get("awayTeamCode") or ""),
+        "homeTeamEn": str(match.get("homeTeamAbbEnName") or ""),
+        "awayTeamEn": str(match.get("awayTeamAbbEnName") or ""),
         "kickoffDate": str(match.get("matchDate") or ""),
         "kickoffTime": str(match.get("matchTime") or ""),
         "saleStatus": str(match.get("sellStatus") or ""),
@@ -338,6 +664,8 @@ def normalized(match: dict[str, Any], collected_at: str) -> dict[str, Any]:
         "analysis": market_analysis(match),
         "collectedAt": collected_at,
     }
+    item["analysisSchedule"] = analysis_schedule(item)
+    return item
 
 
 SCHEMA = """
@@ -372,6 +700,17 @@ CREATE TABLE IF NOT EXISTS odds_history (
 );
 CREATE INDEX IF NOT EXISTS odds_history_match_time
   ON odds_history(match_id, collected_at);
+CREATE TABLE IF NOT EXISTS api_cache (
+  cache_key TEXT PRIMARY KEY,
+  payload TEXT NOT NULL,
+  fetched_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS locked_predictions (
+  match_id TEXT PRIMARY KEY,
+  payload TEXT NOT NULL,
+  locked_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS match_results (
   match_id TEXT PRIMARY KEY,
   full_time_score TEXT NOT NULL,
@@ -455,6 +794,178 @@ def save_matches(connection: sqlite3.Connection, matches: Iterable[dict[str, Any
                 )
             count += 1
     return count
+
+
+def enrich_fundamentals(
+    connection: sqlite3.Connection,
+    api_key: str,
+    source_matches: list[dict[str, Any]],
+    collected_at: str,
+    timeout: float,
+    retries: int,
+) -> dict[str, int]:
+    """Attach API-Football fundamentals and freeze each prediction at its deadline."""
+    if not api_key:
+        with connection:
+            rows = connection.execute("SELECT match_id,payload FROM current_matches").fetchall()
+            for match_id, payload in rows:
+                item = json.loads(payload)
+                item["analysisSchedule"] = analysis_schedule(item)
+                locked = connection.execute(
+                    "SELECT payload FROM locked_predictions WHERE match_id=?", (match_id,)
+                ).fetchone()
+                if locked:
+                    frozen = json.loads(locked[0])
+                    item["analysis"] = frozen.get("analysis", item["analysis"])
+                    item["fundamentals"] = frozen.get("fundamentals")
+                else:
+                    item["fundamentals"] = {
+                        "status": "not_configured", "coverage": 0,
+                        "message": "API-Football 尚未配置",
+                    }
+                connection.execute(
+                    "UPDATE current_matches SET payload=? WHERE match_id=?",
+                    (json.dumps(item, ensure_ascii=False, separators=(",", ":")), match_id),
+                )
+        return {"matched": 0, "enriched": 0, "lineups": 0}
+
+    normalized_by_id = {
+        str(source["matchId"]): normalized(source, collected_at) for source in source_matches
+    }
+    dates = sorted({item["kickoffDate"] for item in normalized_by_id.values() if item.get("kickoffDate")})
+    fixtures_by_date: dict[str, list[dict[str, Any]]] = {}
+    for date in dates:
+        fixtures_by_date[date] = api_football_request(
+            connection, api_key, "fixtures", {"date": date, "timezone": "Asia/Shanghai"},
+            timedelta(hours=6), timeout, retries,
+        )
+
+    mapped: dict[str, tuple[dict[str, Any], float]] = {}
+    for match_id, item in normalized_by_id.items():
+        fixture, confidence = match_api_fixture(item, fixtures_by_date.get(item["kickoffDate"], []))
+        if fixture:
+            mapped[match_id] = (fixture, confidence)
+
+    histories: dict[int, list[dict[str, Any]]] = {}
+    for fixture, _confidence in mapped.values():
+        teams = fixture.get("teams") or {}
+        for side in ("home", "away"):
+            team_id = int(((teams.get(side) or {}).get("id") or 0))
+            if team_id and team_id not in histories:
+                histories[team_id] = api_football_request(
+                    connection, api_key, "fixtures", {"team": team_id, "last": 10, "timezone": "Asia/Shanghai"},
+                    timedelta(hours=24), timeout, retries,
+                )
+
+    injuries_by_date: dict[str, list[dict[str, Any]]] = {}
+    for date in dates:
+        injuries_by_date[date] = api_football_request(
+            connection, api_key, "injuries", {"date": date, "timezone": "Asia/Shanghai"},
+            timedelta(hours=4), timeout, retries,
+        )
+
+    now = now_shanghai()
+    detail_candidates: list[int] = []
+    for match_id, (fixture, _confidence) in mapped.items():
+        schedule_match = normalized_by_id[match_id]
+        kickoff = parse_kickoff(schedule_match)
+        fixture_id = int(((fixture.get("fixture") or {}).get("id") or 0))
+        if kickoff and fixture_id and timedelta(minutes=-15) <= kickoff - now <= timedelta(hours=3):
+            detail_candidates.append(fixture_id)
+    details: dict[int, dict[str, Any]] = {}
+    for start in range(0, len(detail_candidates), 20):
+        ids = "-".join(str(value) for value in detail_candidates[start:start + 20])
+        for item in api_football_request(
+            connection, api_key, "fixtures", {"ids": ids, "timezone": "Asia/Shanghai"},
+            timedelta(minutes=30), timeout, retries,
+        ):
+            fixture_id = int(((item.get("fixture") or {}).get("id") or 0))
+            if fixture_id:
+                details[fixture_id] = item
+
+    enriched_count = lineup_count = 0
+    with connection:
+        for match_id, item in normalized_by_id.items():
+            schedule = analysis_schedule(item, now)
+            item["analysisSchedule"] = schedule
+            mapping = mapped.get(match_id)
+            if not mapping:
+                item["fundamentals"] = {
+                    "status": "unmatched", "coverage": 0,
+                    "message": "未达到安全匹配阈值，未使用基本面调整",
+                }
+            else:
+                fixture, confidence = mapping
+                fixture_meta = fixture.get("fixture") or {}
+                teams = fixture.get("teams") or {}
+                fixture_id = int(fixture_meta.get("id") or 0)
+                home_team = teams.get("home") or {}
+                away_team = teams.get("away") or {}
+                home_id = int(home_team.get("id") or 0)
+                away_id = int(away_team.get("id") or 0)
+                kickoff = parse_kickoff(item) or now
+                home_form = team_form_summary(histories.get(home_id, []), home_id, "home", kickoff)
+                away_form = team_form_summary(histories.get(away_id, []), away_id, "away", kickoff)
+                injury_items = injuries_by_date.get(item["kickoffDate"], [])
+                home_absences = absence_summary(injury_items, fixture_id, home_id)
+                away_absences = absence_summary(injury_items, fixture_id, away_id)
+                lineups = (details.get(fixture_id) or {}).get("lineups") or []
+                lineup_by_team = {
+                    int(((lineup.get("team") or {}).get("id") or 0)): lineup for lineup in lineups
+                }
+                home_lineup = lineup_by_team.get(home_id) or {}
+                away_lineup = lineup_by_team.get(away_id) or {}
+                lineup_confirmed = bool(home_lineup.get("startXI") and away_lineup.get("startXI"))
+                lineup_count += int(lineup_confirmed)
+                history_ready = bool(home_form.get("matches") and away_form.get("matches"))
+                coverage = (4 if history_ready else 0) + 1 + int(lineup_confirmed)
+                fundamentals = {
+                    "status": "ready" if coverage == 6 else "partial",
+                    "coverage": coverage,
+                    "mappingConfidence": confidence,
+                    "fixtureId": fixture_id,
+                    "dataUpdatedAt": collected_at,
+                    "home": {
+                        "teamId": home_id, "apiName": str(home_team.get("name") or ""),
+                        "form": home_form, "absences": home_absences,
+                        "lineup": {
+                            "confirmed": bool(home_lineup.get("startXI")),
+                            "formation": home_lineup.get("formation"),
+                            "startingCount": len(home_lineup.get("startXI") or []),
+                        },
+                    },
+                    "away": {
+                        "teamId": away_id, "apiName": str(away_team.get("name") or ""),
+                        "form": away_form, "absences": away_absences,
+                        "lineup": {
+                            "confirmed": bool(away_lineup.get("startXI")),
+                            "formation": away_lineup.get("formation"),
+                            "startingCount": len(away_lineup.get("startXI") or []),
+                        },
+                    },
+                }
+                item["analysis"] = blend_fundamentals(item["analysis"], fundamentals)
+                item["fundamentals"] = fundamentals
+                enriched_count += int(history_ready)
+
+            locked = connection.execute(
+                "SELECT payload FROM locked_predictions WHERE match_id=?", (match_id,)
+            ).fetchone()
+            if locked:
+                frozen = json.loads(locked[0])
+                item["analysis"] = frozen.get("analysis", item["analysis"])
+                item["fundamentals"] = frozen.get("fundamentals", item.get("fundamentals"))
+            elif schedule["isLocked"]:
+                frozen = {"analysis": item["analysis"], "fundamentals": item.get("fundamentals")}
+                connection.execute(
+                    "INSERT INTO locked_predictions(match_id,payload,locked_at) VALUES (?,?,?)",
+                    (match_id, json.dumps(frozen, ensure_ascii=False, separators=(",", ":")), collected_at),
+                )
+            connection.execute(
+                "UPDATE current_matches SET payload=? WHERE match_id=?",
+                (json.dumps(item, ensure_ascii=False, separators=(",", ":")), match_id),
+            )
+    return {"matched": len(mapped), "enriched": enriched_count, "lineups": lineup_count}
 
 
 def settle_match_results(
@@ -728,6 +1239,38 @@ def run_once(args: argparse.Namespace) -> int:
             )
             result_count = settled_count = 0
             result_error = None
+            fundamental_stats = {"matched": 0, "enriched": 0, "lineups": 0}
+            fundamental_error = None
+            try:
+                fundamental_stats = enrich_fundamentals(
+                    connection, args.api_football_key, matches, collected_at,
+                    args.timeout, args.retries,
+                )
+            except Exception as error:
+                fundamental_error = str(error)
+                logging.warning("fundamental enrichment skipped: %s", error)
+                with connection:
+                    for match_id, payload_text in connection.execute(
+                        "SELECT match_id,payload FROM current_matches"
+                    ).fetchall():
+                        item = json.loads(payload_text)
+                        item["analysisSchedule"] = analysis_schedule(item)
+                        locked = connection.execute(
+                            "SELECT payload FROM locked_predictions WHERE match_id=?", (match_id,)
+                        ).fetchone()
+                        if locked:
+                            frozen = json.loads(locked[0])
+                            item["analysis"] = frozen.get("analysis", item["analysis"])
+                            item["fundamentals"] = frozen.get("fundamentals")
+                        else:
+                            item["fundamentals"] = {
+                                "status": "api_error", "coverage": 0,
+                                "message": "API-Football 服务暂不可用，继续使用体彩市场模型",
+                            }
+                        connection.execute(
+                            "UPDATE current_matches SET payload=? WHERE match_id=?",
+                            (json.dumps(item, ensure_ascii=False, separators=(",", ":")), match_id),
+                        )
             try:
                 official_results = fetch_results(args.timeout, args.retries)
                 result_count, settled_count = settle_match_results(
@@ -745,10 +1288,19 @@ def run_once(args: argparse.Namespace) -> int:
                 "retainedMatchCount": retained_count, "businessDates": live_business_dates,
                 "officialCompletedCount": result_count, "settledPredictionCount": settled_count,
                 "resultStatus": "ok" if result_error is None else "warning",
+                "fundamentalStatus": (
+                    "not_configured" if not args.api_football_key else
+                    "warning" if fundamental_error else "ok"
+                ),
+                "fundamentalMatchedCount": fundamental_stats["matched"],
+                "fundamentalEnrichedCount": fundamental_stats["enriched"],
+                "confirmedLineupCount": fundamental_stats["lineups"],
                 "source": "中国体育彩票官方接口",
             }
             if result_error:
                 health["resultError"] = result_error
+            if fundamental_error:
+                health["fundamentalError"] = fundamental_error
             atomic_json(data_dir / "health.json", health)
             with connection:
                 connection.execute(
@@ -780,6 +1332,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=20)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retention-days", type=int, default=90)
+    parser.add_argument("--api-football-key", default=os.environ.get("API_FOOTBALL_KEY", ""))
     return parser.parse_args()
 
 
