@@ -104,6 +104,33 @@ class CollectorTests(unittest.TestCase):
             legs = recommendations["2026-09-08"][0]["legs"]
             self.assertNotEqual(legs[0]["matchId"], legs[1]["matchId"])
 
+    def test_settles_predictions_against_official_full_time_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = collector.connect_database(Path(directory) / "test.sqlite3")
+            collector.save_matches(
+                connection, collector.flatten_matches(SAMPLE), "2026-09-08T08:00:00+00:00"
+            )
+            completed, settled = collector.settle_match_results(
+                connection,
+                [{
+                    "matchId": 2041345,
+                    "matchResultStatus": "2",
+                    "sectionsNo1": "0:1",
+                    "sectionsNo999": "0:2",
+                    "winFlag": "A",
+                }],
+                "2026-09-08T10:00:00+00:00",
+            )
+            self.assertEqual((completed, settled), (1, 1))
+            row = connection.execute(
+                "SELECT actual_outcome,outcome_hit,actual_score FROM prediction_settlements"
+            ).fetchone()
+            self.assertEqual(row, ("客胜", 1, "0-2"))
+            performance = collector.performance_summary(connection)
+            self.assertEqual(performance["settledMatches"], 1)
+            self.assertEqual(performance["outcomeHitRate"], 100.0)
+            connection.close()
+
 
 if __name__ == "__main__":
     unittest.main()

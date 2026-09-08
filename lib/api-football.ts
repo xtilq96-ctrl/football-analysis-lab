@@ -13,6 +13,32 @@ type ModelAnalysis = {
   over25Probability?: number;
   expectedGoals?: { home: number; away: number; total: number };
 };
+type MatchResult = {
+  fullTimeScore: string;
+  halfTimeScore?: string;
+  actualOutcome: string;
+  settledAt: string;
+};
+type MatchSettlement = {
+  outcomeHit: boolean | null;
+  scoreHit: boolean | null;
+  totalGoalsHit: boolean | null;
+  overUnderHit: boolean | null;
+};
+export type PerformanceSummary = {
+  settledMatches: number;
+  outcomeHits: number;
+  outcomeHitRate: number | null;
+  exactScoreHits: number;
+  exactScoreHitRate: number | null;
+  totalGoalsHits: number;
+  totalGoalsHitRate: number | null;
+  overUnderHits: number;
+  overUnderHitRate: number | null;
+  settledTwoLegs: number;
+  twoLegHits: number;
+  twoLegHitRate: number | null;
+};
 type SportteryMatch = {
   matchId: number;
   matchNum: number;
@@ -28,6 +54,8 @@ type SportteryMatch = {
   had?: Odds;
   hhad?: Odds;
   analysis?: ModelAnalysis;
+  result?: MatchResult;
+  settlement?: MatchSettlement;
 };
 type SportteryEnvelope = { success: boolean; errorCode: string; value?: { matchInfoList?: Array<{ businessDate: string; subMatchList: SportteryMatch[] }> } };
 type RelayMatch = {
@@ -44,6 +72,8 @@ type RelayMatch = {
   had?: Odds;
   hhad?: Odds;
   analysis?: ModelAnalysis;
+  result?: MatchResult;
+  settlement?: MatchSettlement;
 };
 export type DashboardRecommendation = {
   level: string;
@@ -68,6 +98,7 @@ type RelayPayload = {
   count: number;
   matches: RelayMatch[];
   recommendations?: Record<string, DashboardRecommendation[]>;
+  performance?: PerformanceSummary;
 };
 
 const VERIFIED_SNAPSHOT_2026_09_08: SportteryMatch[] = [
@@ -84,6 +115,13 @@ const VERIFIED_SNAPSHOT_2026_09_08: SportteryMatch[] = [
   { matchId: 2041354, matchNum: 2011, matchNumStr: '周二011', matchWeek: '周二', businessDate: '2026-09-08', matchDate: '2026-09-09', matchTime: '03:00:00', leagueAllName: '欧洲冠军联赛', homeTeamAllName: '波尔图', awayTeamAllName: '曼彻斯特城', sellStatus: '1', had: { h: '4.85', d: '4.05', a: '1.48', updateDate: '2026-09-07', updateTime: '13:58:26' }, hhad: { h: '2.26', d: '3.65', a: '2.42', goalLine: '+1' } },
   { matchId: 2041355, matchNum: 2012, matchNumStr: '周二012', matchWeek: '周二', businessDate: '2026-09-08', matchDate: '2026-09-09', matchTime: '06:00:00', leagueAllName: '南美解放者杯', homeTeamAllName: '弗鲁米嫩塞', awayTeamAllName: '普拉滕斯', sellStatus: '1', had: { h: '1.53', d: '3.20', a: '6.15', updateDate: '2026-09-08', updateTime: '14:31:54' }, hhad: { h: '2.90', d: '3.18', a: '2.13', goalLine: '-1' } },
 ];
+
+const EMPTY_PERFORMANCE: PerformanceSummary = {
+  settledMatches: 0, outcomeHits: 0, outcomeHitRate: null, exactScoreHits: 0,
+  exactScoreHitRate: null, totalGoalsHits: 0, totalGoalsHitRate: null,
+  overUnderHits: 0, overUnderHitRate: null, settledTwoLegs: 0,
+  twoLegHits: 0, twoLegHitRate: null,
+};
 
 export type DashboardMatch = {
   id: number;
@@ -114,9 +152,11 @@ export type DashboardMatch = {
   over25Probability: number | null;
   under25Probability: number | null;
   expectedGoals: { home: number; away: number; total: number } | null;
+  result: MatchResult | null;
+  settlement: MatchSettlement | null;
 };
 
-export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
+export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; performance: PerformanceSummary; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
 
 function shanghaiDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -205,6 +245,8 @@ function relayMatch(item: RelayMatch): SportteryMatch {
     had: item.had,
     hhad: item.hhad,
     analysis: item.analysis,
+    result: item.result,
+    settlement: item.settlement,
   };
 }
 
@@ -241,6 +283,7 @@ export async function getDashboardData(): Promise<DashboardData> {
   let updatedAt = new Date().toISOString();
   let sourceMode: DashboardData['sourceMode'] = 'mainland_relay';
   let recommendations: DashboardRecommendation[] = [];
+  let performance = EMPTY_PERFORMANCE;
   try {
     let source: SportteryMatch[] = [];
     try {
@@ -249,6 +292,7 @@ export async function getDashboardData(): Promise<DashboardData> {
       updatedAt = relay.updatedAt;
       source = relay.matches.filter((item) => item.businessDate === businessDate).map(relayMatch);
       recommendations = relay.recommendations?.[businessDate] ?? [];
+      performance = relay.performance ?? EMPTY_PERFORMANCE;
       if (businessDate === '2026-09-08') {
         const merged = new Map(VERIFIED_SNAPSHOT_2026_09_08.map((item) => [item.matchId, item]));
         source.forEach((item) => merged.set(item.matchId, item));
@@ -302,10 +346,12 @@ export async function getDashboardData(): Promise<DashboardData> {
         over25Probability: item.analysis?.over25Probability ?? null,
         under25Probability: item.analysis?.under25Probability ?? null,
         expectedGoals: item.analysis?.expectedGoals ?? null,
+        result: item.result ?? null,
+        settlement: item.settlement ?? null,
       };
     });
-    return { matches, recommendations, updatedAt, businessDate, sourceMode };
+    return { matches, recommendations, performance, updatedAt, businessDate, sourceMode };
   } catch (error) {
-    return { matches: [], recommendations: [], updatedAt, businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
+    return { matches: [], recommendations: [], performance, updatedAt, businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
   }
 }
