@@ -64,3 +64,11 @@ export const userJudgments = sqliteTable('user_judgments', {
 export const jobs = sqliteTable('jobs', {
   id: text('id').primaryKey(), jobType: text('job_type').notNull(), idempotencyKey: text('idempotency_key').notNull(), matchId: text('match_id').references(() => matches.id), status: text('status').notNull(), priority: integer('priority').notNull().default(100), scheduledAt: integer('scheduled_at', { mode: 'timestamp_ms' }).notNull(), startedAt: integer('started_at', { mode: 'timestamp_ms' }), finishedAt: integer('finished_at', { mode: 'timestamp_ms' }), attempts: integer('attempts').notNull().default(0), lastErrorCode: text('last_error_code'), traceId: text('trace_id'), ...timestamps,
 }, (table) => [uniqueIndex('idx_jobs_idempotency').on(table.idempotencyKey), index('idx_jobs_status_schedule').on(table.status, table.scheduledAt)]);
+
+export const apiCache = sqliteTable('api_cache', {
+  cacheKey: text('cache_key').primaryKey(),
+  payload: text('payload').notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+}, (table) => [index('idx_api_cache_expiry').on(table.expiresAt)]);
+
