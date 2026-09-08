@@ -31,6 +31,10 @@ SAMPLE = {
                         "leagueAllName": "韩国职业联赛",
                         "homeTeamAllName": "蔚山现代",
                         "awayTeamAllName": "首尔FC",
+                        "homeTeamCode": "ULS",
+                        "awayTeamCode": "SEO",
+                        "homeTeamAbbEnName": "Ulsan",
+                        "awayTeamAbbEnName": "Seoul",
                         "sellStatus": "1",
                         "had": {"h": "3.29", "d": "3.58", "a": "1.83"},
                         "hhad": {"h": "1.74", "d": "3.80", "a": "3.43", "goalLine": "+1"},
@@ -130,6 +134,71 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(performance["settledMatches"], 1)
             self.assertEqual(performance["outcomeHitRate"], 100.0)
             connection.close()
+
+    def test_early_match_uses_its_own_deadline(self):
+        match = collector.normalized(
+            collector.flatten_matches(SAMPLE)[0], "2026-09-08T02:00:00+00:00"
+        )
+        now = collector.datetime(2026, 9, 8, 17, 15, tzinfo=collector.SHANGHAI)
+        schedule = collector.analysis_schedule(match, now)
+        self.assertTrue(schedule["isEarlyMatch"])
+        self.assertEqual(schedule["phase"], "最终分析")
+        self.assertEqual(schedule["finalAnalysisAt"][11:16], "17:00")
+
+    def test_matches_api_fixture_and_builds_recent_form(self):
+        match = collector.normalized(
+            collector.flatten_matches(SAMPLE)[0], "2026-09-08T02:00:00+00:00"
+        )
+        kickoff = collector.parse_kickoff(match)
+        fixture = {
+            "fixture": {"id": 99, "timestamp": int(kickoff.timestamp()), "status": {"short": "NS"}},
+            "teams": {
+                "home": {"id": 1, "name": "Ulsan HD"},
+                "away": {"id": 2, "name": "FC Seoul"},
+            },
+            "goals": {"home": None, "away": None},
+        }
+        selected, confidence = collector.match_api_fixture(match, [fixture])
+        self.assertEqual(selected["fixture"]["id"], 99)
+        self.assertGreaterEqual(confidence, 0.72)
+
+        history = []
+        for index, score in enumerate([(2, 0), (1, 1), (0, 1), (3, 0), (1, 0)]):
+            history.append({
+                "fixture": {
+                    "timestamp": int((kickoff - collector.timedelta(days=index + 4)).timestamp()),
+                    "status": {"short": "FT"},
+                },
+                "teams": {"home": {"id": 1}, "away": {"id": 10 + index}},
+                "goals": {"home": score[0], "away": score[1]},
+            })
+        summary = collector.team_form_summary(history, 1, "home", kickoff)
+        self.assertEqual(summary["matches"], 5)
+        self.assertEqual(summary["wins"], 3)
+        self.assertEqual(summary["cleanSheetRate"], 60.0)
+
+    def test_fundamentals_adjust_market_probability(self):
+        base = collector.market_analysis(collector.flatten_matches(SAMPLE)[0])
+        fundamentals = {
+            "status": "ready",
+            "home": {
+                "form": {"matches": 5, "pointsPerGame": 2.4, "goalsForPerGame": 2.0,
+                         "goalsAgainstPerGame": 0.6, "cleanSheetRate": 60, "restDays": 6,
+                         "venue": {"matches": 5, "pointsPerGame": 2.6,
+                                   "goalsForPerGame": 2.2, "goalsAgainstPerGame": 0.4}},
+                "absences": {"injuries": 0, "suspensions": 0},
+            },
+            "away": {
+                "form": {"matches": 5, "pointsPerGame": 0.8, "goalsForPerGame": 0.8,
+                         "goalsAgainstPerGame": 1.8, "cleanSheetRate": 20, "restDays": 3,
+                         "venue": {"matches": 4, "pointsPerGame": 0.5,
+                                   "goalsForPerGame": 0.5, "goalsAgainstPerGame": 2.0}},
+                "absences": {"injuries": 2, "suspensions": 1},
+            },
+        }
+        adjusted = collector.blend_fundamentals(base, fundamentals)
+        self.assertEqual(adjusted["modelVersion"], "v2-market-fundamentals")
+        self.assertGreater(adjusted["probabilities"]["home"], base["probabilities"]["home"])
 
 
 if __name__ == "__main__":

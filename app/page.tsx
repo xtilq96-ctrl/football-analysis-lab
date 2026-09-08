@@ -22,6 +22,9 @@ export default async function Home() {
   const predicted = data.matches.filter((match) => match.probabilities).length;
   const withOdds = data.matches.filter((match) => match.marketProbabilities).length;
   const completeness = data.matches.length ? Math.round((predicted / data.matches.length) * 100) : 0;
+  const fundamentalsReady = data.matches.filter((match) => match.fundamentals?.home && match.fundamentals?.away).length;
+  const lineupsReady = data.matches.filter((match) => match.fundamentals?.home?.lineup.confirmed && match.fundamentals?.away?.lineup.confirmed).length;
+  const fundamentalCompleteness = data.matches.length ? Math.round((fundamentalsReady / data.matches.length) * 100) : 0;
   const numberRange = data.matches.length
     ? `${data.matches[0].officialNumber}–${data.matches[data.matches.length - 1].officialNumber.slice(-3)}`
     : '暂无场次';
@@ -87,15 +90,16 @@ export default async function Home() {
               <StatusRow label="体彩官方赛程" value={data.error ? '重试中' : '已导入'} meta={`${data.matches.length} 场 · ${updatedAt}`} muted={Boolean(data.error)} />
               <StatusRow label="官方固定奖" value={withOdds ? '已接入' : '等待中'} meta={`${withOdds}/${data.matches.length} 场`} muted={!withOdds} />
               <StatusRow label="去水概率" value={predicted ? '已生成' : '等待中'} meta={`${predicted}/${data.matches.length} 场`} muted={!predicted} />
+              <StatusRow label="球队基本面" value={fundamentalsReady ? '已接入' : '匹配中'} meta={`${fundamentalsReady}/${data.matches.length} 场 · 首发 ${lineupsReady} 场`} muted={!fundamentalsReady} />
               <StatusRow label="赛果自动结算" value={data.performance.settledMatches ? '已运行' : '等待完赛'} meta={`${data.performance.settledMatches} 场已核对`} muted={!data.performance.settledMatches} />
               <StatusRow label="数据模式" value={data.sourceMode === 'mainland_relay' ? '大陆自动采集' : data.sourceMode === 'live' ? '官方直连' : '官方快照'} meta={data.sourceMode === 'mainland_relay' ? '每 5 分钟更新' : data.sourceMode === 'live' ? '实时读取' : '自动恢复中'} muted={data.sourceMode === 'verified_snapshot'} />
             </CardContent>
           </Card>
           <Card className="overflow-hidden border-lime-300/12 bg-[linear-gradient(145deg,rgba(190,242,100,.09),rgba(255,255,255,.025))] shadow-none">
             <CardContent className="p-5">
-              <div className="flex items-center justify-between"><p className="text-sm font-medium text-white/75">预测数据覆盖</p><span className="text-xl font-semibold text-lime-300">{completeness}</span></div>
-              <Progress value={completeness} className="mt-3 h-1.5 bg-white/8 [&_[data-slot=progress-indicator]]:bg-lime-300" />
-              <p className="mt-3 text-xs leading-5 text-white/40">体彩固定奖去水概率已上线；API-Football 后续仅作为球队状态、伤停和比赛统计的辅助源。</p>
+              <div className="flex items-center justify-between"><p className="text-sm font-medium text-white/75">V2 基本面覆盖</p><span className="text-xl font-semibold text-lime-300">{fundamentalCompleteness}</span></div>
+              <Progress value={fundamentalCompleteness} className="mt-3 h-1.5 bg-white/8 [&_[data-slot=progress-indicator]]:bg-lime-300" />
+              <p className="mt-3 text-xs leading-5 text-white/40">已接入近期状态、主客场攻防、休息天数、伤停停赛和临场首发；未安全匹配的场次不会强行调整概率。</p>
             </CardContent>
           </Card>
           <Card className="border-white/8 bg-white/[.035] shadow-none">
@@ -124,7 +128,7 @@ function MatchCard({ match }: { match: DashboardMatch }) {
     <Card className="group border-white/8 bg-white/[.035] py-0 shadow-none transition-colors hover:border-white/15 hover:bg-white/[.05]">
       <CardContent className="p-5 sm:p-6">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2 text-xs text-white/42"><Badge className="border-lime-300/20 bg-lime-300/10 text-lime-200">{match.officialNumber}</Badge><span className="truncate">{match.league}</span><span>·</span><span>{match.dateLabel}</span><Clock3 className="h-3.5 w-3.5" /><span>{match.time}</span></div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-white/42"><Badge className="border-lime-300/20 bg-lime-300/10 text-lime-200">{match.officialNumber}</Badge><span className="truncate">{match.league}</span><span>·</span><span>{match.dateLabel}</span><Clock3 className="h-3.5 w-3.5" /><span>{match.time}</span>{match.analysisSchedule?.isEarlyMatch && <Badge variant="outline" className="border-sky-400/20 text-sky-300">早场</Badge>}{match.analysisSchedule && <Badge variant="outline" className={match.analysisSchedule.isLocked ? 'border-emerald-400/20 text-emerald-300' : 'border-white/10 text-white/50'}>{match.analysisSchedule.phase}</Badge>}</div>
           <Badge variant="outline" className={riskStyles[match.riskTone]}>{match.risk}</Badge>
         </div>
         <div className="mt-5 grid items-center gap-5 sm:grid-cols-[minmax(170px,.8fr)_minmax(280px,1.2fr)_auto]">
@@ -144,6 +148,11 @@ function MatchCard({ match }: { match: DashboardMatch }) {
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">{match.scoreProbabilities.slice(0, 3).map((score) => <Badge key={score.score} variant="outline" className="border-white/10 text-white/55">{score.score} · {score.probability}%</Badge>)}</div>
         </div>}
+        {match.fundamentals?.home && match.fundamentals?.away ? <div className="mt-3 rounded-xl border border-sky-400/12 bg-sky-400/[.045] p-3">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium text-sky-200">V2 球队基本面 · 覆盖 {match.fundamentals.coverage}/6</span><span className="text-white/35">{match.analysisSchedule ? `最终分析 ${match.analysisSchedule.finalAnalysisAt.slice(11, 16)} · 锁定 ${match.analysisSchedule.lockAt.slice(11, 16)}` : ''}</span></div>
+          <div className="grid gap-3 sm:grid-cols-2"><TeamFormPanel name={match.home} team={match.fundamentals.home} /><TeamFormPanel name={match.away} team={match.fundamentals.away} /></div>
+          {match.fundamentals.probabilityAdjustmentPoints && <p className="mt-3 border-t border-white/7 pt-2 text-xs text-white/40">基本面概率修正：主胜 {signed(match.fundamentals.probabilityAdjustmentPoints.home)} · 平局 {signed(match.fundamentals.probabilityAdjustmentPoints.draw)} · 客胜 {signed(match.fundamentals.probabilityAdjustmentPoints.away)} 个百分点</p>}
+        </div> : match.fundamentals && <div className="mt-3 rounded-xl border border-amber-400/12 bg-amber-400/[.04] p-3 text-xs text-amber-100/55">基本面数据：{match.fundamentals.message ?? '正在安全匹配球队，暂不调整市场概率。'}</div>}
         {match.result && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-400/15 bg-emerald-400/[.06] p-3 text-sm"><span className="text-white/65">官方赛果 <b className="ml-1 text-emerald-200">{match.result.fullTimeScore} · {match.result.actualOutcome}</b></span><span className={match.settlement?.outcomeHit ? 'text-emerald-300' : 'text-rose-300'}>{match.settlement?.outcomeHit ? '胜平负命中' : '胜平负未命中'}</span></div>}
         <p className="mt-4 border-t border-white/7 pt-4 text-sm leading-6 text-white/48">{match.note}</p>
       </CardContent>
@@ -157,7 +166,7 @@ function RecommendationPanel({ recommendations }: { recommendations: DashboardRe
       <CardHeader className="pb-3">
         <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base font-medium">
           <span className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-lime-300" />自动 2 串 1</span>
-          <span className="text-xs font-normal text-white/35">V1 市场概率 + 泊松比分模型</span>
+          <span className="text-xs font-normal text-white/35">V2 市场概率 + 球队基本面 + 泊松比分</span>
         </CardTitle>
       </CardHeader>
       <CardContent>
@@ -172,6 +181,27 @@ function RecommendationPanel({ recommendations }: { recommendations: DashboardRe
       </CardContent>
     </Card>
   );
+}
+
+function signed(value: number) {
+  return `${value > 0 ? '+' : ''}${value}`;
+}
+
+function TeamFormPanel({ name, team }: { name: string; team: NonNullable<NonNullable<DashboardMatch['fundamentals']>['home']> }) {
+  const form = team.form;
+  return <div className="rounded-lg border border-white/7 bg-black/10 p-3 text-xs">
+    <div className="flex items-center justify-between gap-2"><b className="truncate text-white/75">{name}</b><span className="text-white/35">近 {form.matches} 场 {form.form || '—'}</span></div>
+    <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-white/45">
+      <span>胜平负 <b className="text-white/70">{form.wins}/{form.draws}/{form.losses}</b></span>
+      <span>场均积分 <b className="text-white/70">{form.pointsPerGame ?? '—'}</b></span>
+      <span>进/失球 <b className="text-white/70">{form.goalsForPerGame ?? '—'}/{form.goalsAgainstPerGame ?? '—'}</b></span>
+      <span>零封率 <b className="text-white/70">{form.cleanSheetRate ?? '—'}%</b></span>
+      <span>休息 <b className="text-white/70">{form.restDays ?? '—'} 天</b></span>
+      <span>14天赛程 <b className="text-white/70">{form.matchesLast14Days} 场</b></span>
+      <span>伤停/停赛 <b className="text-white/70">{team.absences.injuries}/{team.absences.suspensions}</b></span>
+      <span>首发 <b className={team.lineup.confirmed ? 'text-emerald-300' : 'text-amber-300'}>{team.lineup.confirmed ? `已确认${team.lineup.formation ? ` · ${team.lineup.formation}` : ''}` : '未公布'}</b></span>
+    </div>
+  </div>;
 }
 
 function NavItem({ icon, label, active = false }: { icon: React.ReactNode; label: string; active?: boolean }) {
