@@ -21,6 +21,16 @@ type ApiPrediction = {
   };
 };
 
+type ApiOdds = {
+  bookmakers?: Array<{
+    name: string;
+    bets?: Array<{
+      name: string;
+      values?: Array<{ value: string; odd: string }>;
+    }>;
+  }>;
+};
+
 export type DashboardMatch = {
   id: number;
   league: string;
@@ -29,6 +39,11 @@ export type DashboardMatch = {
   home: string;
   away: string;
   probabilities: [number, number, number] | null;
+  providerProbabilities: [number, number, number] | null;
+  marketProbabilities: [number, number, number] | null;
+  averageOdds: [number, number, number] | null;
+  bookmakerCount: number;
+  marketMargin: number | null;
   goals: string;
   confidence: number | null;
   risk: '低风险' | '中风险' | '高风险' | '待评估';
@@ -104,11 +119,51 @@ function analyzeRisk(probabilities: [number, number, number] | null) {
   return { risk: '高风险' as const, riskTone: 'red' as const };
 }
 
-function buildNote(probabilities: [number, number, number] | null) {
-  if (!probabilities) return '真实赛程已导入，供应商基础预测尚未返回，系统会在下一次刷新时重试。';
+function normalize(values: [number, number, number]): [number, number, number] {
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (!total) return [0, 0, 0];
+  const first = Math.round((values[0] / total) * 100);
+  const second = Math.round((values[1] / total) * 100);
+  return [first, second, 100 - first - second];
+}
+
+function calculateMarket(odds: ApiOdds | null) {
+  const rows = (odds?.bookmakers ?? []).flatMap((bookmaker) => {
+    const market = bookmaker.bets?.find((bet) => bet.name === 'Match Winner');
+    const values = ['Home', 'Draw', 'Away'].map((selection) =>
+      Number(market?.values?.find((item) => item.value === selection)?.odd),
+    ) as [number, number, number];
+    if (values.some((value) => !Number.isFinite(value) || value <= 1)) return [];
+    const implied = values.map((value) => 1 / value) as [number, number, number];
+    const overround = implied.reduce((sum, value) => sum + value, 0);
+    return [{ values, probabilities: implied.map((value) => value / overround) as [number, number, number], overround }];
+  });
+  if (!rows.length) return null;
+  const average = (index: number) => rows.reduce((sum, row) => sum + row.probabilities[index], 0) / rows.length;
+  const averageOdd = (index: number) => rows.reduce((sum, row) => sum + row.values[index], 0) / rows.length;
+  return {
+    probabilities: normalize([average(0), average(1), average(2)]),
+    averageOdds: [averageOdd(0), averageOdd(1), averageOdd(2)].map((value) => Number(value.toFixed(2))) as [number, number, number],
+    bookmakerCount: rows.length,
+    margin: Number(((rows.reduce((sum, row) => sum + row.overround, 0) / rows.length - 1) * 100).toFixed(1)),
+  };
+}
+
+function fuseProbabilities(provider: [number, number, number] | null, market: [number, number, number] | null) {
+  if (provider && market) return normalize(provider.map((value, index) => value * 0.35 + market[index] * 0.65) as [number, number, number]);
+  return market ?? provider;
+}
+
+function buildNote(provider: [number, number, number] | null, market: [number, number, number] | null) {
+  const probabilities = fuseProbabilities(provider, market);
+  if (!probabilities) return '真实赛程已导入，预测与赔率数据尚未返回，系统会在下一次刷新时重试。';
   const labels = ['主队', '平局', '客队'];
   const strongest = probabilities.indexOf(Math.max(...probabilities));
-  return `API-Football 基础概率当前偏向${labels[strongest]}。这是第一阶段供应商基线，后续将叠加球队状态、伤停与市场数据。`;
+  if (provider && market) {
+    const divergence = Math.max(...provider.map((value, index) => Math.abs(value - market[index])));
+    return `初步融合结果偏向${labels[strongest]}；市场与供应商最大分歧 ${divergence} 个百分点。当前权重为市场 65%、供应商预测 35%。`;
+  }
+  return `${market ? '赔率市场' : '供应商基础预测'}当前偏向${labels[strongest]}，另一组数据暂未返回。`;
 }
 
 export async function getDashboardData(): Promise<DashboardData> {
@@ -129,14 +184,24 @@ export async function getDashboardData(): Promise<DashboardData> {
 
     const preferred = fixtures.filter((item) => LEAGUE_PRIORITY.has(item.league.id));
     const selected = (preferred.length ? preferred : fixtures).slice(0, 6);
-    const predictions = await Promise.all(selected.map(async (fixture) => {
+    const [predictions, odds] = await Promise.all([
+      Promise.all(selected.map(async (fixture) => {
       try {
         const result = await cachedRequest<ApiPrediction[]>(`/predictions?fixture=${fixture.fixture.id}`, 60 * 60_000);
         return result[0] ?? null;
       } catch {
         return null;
       }
-    }));
+      })),
+      Promise.all(selected.map(async (fixture) => {
+        try {
+          const result = await cachedRequest<ApiOdds[]>(`/odds?fixture=${fixture.fixture.id}`, 30 * 60_000);
+          return result[0] ?? null;
+        } catch {
+          return null;
+        }
+      })),
+    ]);
 
     const matches = selected.map((fixture, index): DashboardMatch => {
       const prediction = predictions[index]?.predictions;
@@ -145,7 +210,10 @@ export async function getDashboardData(): Promise<DashboardData> {
         percentage(prediction?.percent?.draw),
         percentage(prediction?.percent?.away),
       ];
-      const probabilities = values.some(Boolean) ? values : null;
+      const providerProbabilities = values.some(Boolean) ? values : null;
+      const market = calculateMarket(odds[index]);
+      const marketProbabilities = market?.probabilities ?? null;
+      const probabilities = fuseProbabilities(providerProbabilities, marketProbabilities);
       const risk = analyzeRisk(probabilities);
       const date = new Date(fixture.fixture.date);
       return {
@@ -156,10 +224,15 @@ export async function getDashboardData(): Promise<DashboardData> {
         home: fixture.teams.home.name,
         away: fixture.teams.away.name,
         probabilities,
+        providerProbabilities,
+        marketProbabilities,
+        averageOdds: market?.averageOdds ?? null,
+        bookmakerCount: market?.bookmakerCount ?? 0,
+        marketMargin: market?.margin ?? null,
         goals: prediction?.under_over ? `${prediction.under_over} 球线` : '待评估',
         confidence: probabilities ? Math.max(...probabilities) : null,
         ...risk,
-        note: buildNote(probabilities),
+        note: buildNote(providerProbabilities, marketProbabilities),
       };
     });
 

@@ -20,6 +20,7 @@ export default async function Home() {
     timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(new Date(data.updatedAt));
   const predicted = data.matches.filter((match) => match.probabilities).length;
+  const withOdds = data.matches.filter((match) => match.marketProbabilities).length;
   const completeness = data.matches.length ? Math.round((predicted / data.matches.length) * 100) : 0;
 
   return (
@@ -55,7 +56,7 @@ export default async function Home() {
         <section className="min-w-0">
           <div className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
             <div>
-              <div className="mb-2 flex items-center gap-2 text-sm text-lime-300"><Activity className="h-4 w-4" />真实赛程与基础预测</div>
+              <div className="mb-2 flex items-center gap-2 text-sm text-lime-300"><Activity className="h-4 w-4" />真实赛程、赔率与融合概率</div>
               <h1 className="text-2xl font-semibold tracking-[-0.035em] sm:text-[2rem]">未来 48 小时比赛分析</h1>
               <p className="mt-1.5 text-sm text-white/45">{data.matches.length} 场重点观察 · 最近同步 {updatedAt} · 北京时间</p>
             </div>
@@ -64,7 +65,7 @@ export default async function Home() {
 
           <div className={`mb-5 flex items-start gap-3 rounded-2xl p-4 text-sm ${data.error ? 'border border-amber-400/15 bg-amber-400/[.065] text-amber-100/75' : 'border border-sky-400/15 bg-sky-400/[.065] text-sky-100/75'}`}>
             <CircleAlert className={`mt-0.5 h-4 w-4 shrink-0 ${data.error ? 'text-amber-300' : 'text-sky-300'}`} />
-            <p>{data.error ? <><span className="font-medium">真实数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : <><span className="font-medium text-sky-200">演示数据已关闭。</span> 当前赛程与概率来自 API-Football，缓存可保护每日接口额度；这还是供应商基础预测，不代表最终自研模型。</>}</p>
+            <p>{data.error ? <><span className="font-medium">真实数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : <><span className="font-medium text-sky-200">赔率算法已启用。</span> 当前融合概率按去水后的市场概率 65% 与供应商预测 35% 计算；这仍是第一阶段规则模型，不代表最终机器学习模型。</>}</p>
           </div>
 
           {data.matches.length ? (
@@ -80,15 +81,15 @@ export default async function Home() {
             <CardContent className="space-y-4">
               <StatusRow label="赛程数据" value={data.error ? '重试中' : '已导入'} meta={`更新于 ${updatedAt}`} muted={Boolean(data.error)} />
               <StatusRow label="基础预测" value={predicted ? '已生成' : '等待中'} meta={`${predicted}/${data.matches.length} 场`} muted={!predicted} />
-              <StatusRow label="数据缓存" value="已启用" meta="赛程 30 分钟" />
-              <StatusRow label="伤停与赔率" value="待接入" meta="下一施工阶段" muted />
+              <StatusRow label="真实欧赔" value={withOdds ? '已接入' : '等待中'} meta={`${withOdds}/${data.matches.length} 场`} muted={!withOdds} />
+              <StatusRow label="数据缓存" value="已启用" meta="赛程与赔率 30 分钟" />
             </CardContent>
           </Card>
           <Card className="overflow-hidden border-lime-300/12 bg-[linear-gradient(145deg,rgba(190,242,100,.09),rgba(255,255,255,.025))] shadow-none">
             <CardContent className="p-5">
               <div className="flex items-center justify-between"><p className="text-sm font-medium text-white/75">预测数据覆盖</p><span className="text-xl font-semibold text-lime-300">{completeness}</span></div>
               <Progress value={completeness} className="mt-3 h-1.5 bg-white/8 [&_[data-slot=progress-indicator]]:bg-lime-300" />
-              <p className="mt-3 text-xs leading-5 text-white/40">当前接入供应商基础概率；自研融合模型、回测和校准将在后续阶段上线。</p>
+              <p className="mt-3 text-xs leading-5 text-white/40">已加入赔率去水和第一版加权融合；球队状态、伤停、回测与动态校准将在后续阶段上线。</p>
             </CardContent>
           </Card>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-1 xl:grid-cols-2"><Metric label="未来 48 小时" value={String(data.matches.length)} unit="场" /><Metric label="预测覆盖" value={String(completeness)} unit="%" /></div>
@@ -112,12 +113,13 @@ function MatchCard({ match }: { match: DashboardMatch }) {
           <Badge variant="outline" className={riskStyles[match.riskTone]}>{match.risk}</Badge>
         </div>
         <div className="mt-5 grid items-center gap-5 sm:grid-cols-[minmax(170px,.8fr)_minmax(280px,1.2fr)_auto]">
-          <div><div className="flex items-center gap-3 text-lg font-semibold tracking-tight"><span>{match.home}</span><span className="text-sm font-normal text-white/25">vs</span><span>{match.away}</span></div><p className="mt-1 text-xs text-white/35">总进球 {match.goals} · {match.confidence === null ? '等待概率' : `最高概率 ${match.confidence}%`}</p></div>
+          <div><div className="flex items-center gap-3 text-lg font-semibold tracking-tight"><span>{match.home}</span><span className="text-sm font-normal text-white/25">vs</span><span>{match.away}</span></div><p className="mt-1 text-xs text-white/35">总进球 {match.goals} · {match.confidence === null ? '等待概率' : `融合最高概率 ${match.confidence}%`}</p></div>
           <div>
             {match.probabilities ? <><div className="mb-2 flex justify-between text-xs text-white/45"><span>主胜 <b className="ml-1 font-semibold text-white/85">{home}%</b></span><span>平局 <b className="ml-1 font-semibold text-white/85">{draw}%</b></span><span>客胜 <b className="ml-1 font-semibold text-white/85">{away}%</b></span></div><div className="flex h-2 overflow-hidden rounded-full bg-white/5"><span className="bg-lime-300" style={{ width: `${home}%` }} /><span className="bg-sky-400" style={{ width: `${draw}%` }} /><span className="bg-violet-400" style={{ width: `${away}%` }} /></div></> : <p className="text-sm text-white/35">预测数据等待下一次同步</p>}
           </div>
           <Button variant="ghost" size="sm" className="justify-self-start text-white/60 hover:bg-white/7 hover:text-white sm:justify-self-end">分析摘要 <ChevronRight className="h-4 w-4" /></Button>
         </div>
+        {match.averageOdds && match.marketProbabilities && <div className="mt-4 grid gap-2 rounded-xl border border-white/7 bg-black/10 p-3 text-xs text-white/45 sm:grid-cols-3"><span>平均欧赔 <b className="ml-1 text-white/75">{match.averageOdds.join(' / ')}</b></span><span>去水市场概率 <b className="ml-1 text-white/75">{match.marketProbabilities.join('% / ')}%</b></span><span>样本 <b className="ml-1 text-white/75">{match.bookmakerCount} 家</b>{match.marketMargin !== null && ` · 利润率 ${match.marketMargin}%`}</span></div>}
         <p className="mt-4 border-t border-white/7 pt-4 text-sm leading-6 text-white/48">{match.note}</p>
       </CardContent>
     </Card>
