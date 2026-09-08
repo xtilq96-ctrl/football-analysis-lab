@@ -50,6 +50,13 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(item["officialNumber"], "周二001")
         self.assertEqual(item["analysis"]["prediction"], "客胜")
         self.assertAlmostEqual(sum(item["analysis"]["probabilities"].values()), 100, places=1)
+        self.assertRegex(item["analysis"]["predictedScore"], r"^\d+-\d+$")
+        predicted_home, predicted_away = map(int, item["analysis"]["predictedScore"].split("-"))
+        self.assertLess(predicted_home, predicted_away)
+        self.assertEqual(len(item["analysis"]["scoreProbabilities"]), 5)
+        self.assertAlmostEqual(
+            sum(item["analysis"]["totalGoalsProbabilities"].values()), 100, places=1
+        )
 
     def test_deduplicates_the_same_match_from_multiple_pool_groups(self):
         duplicate = json.loads(json.dumps(SAMPLE, ensure_ascii=False))
@@ -85,6 +92,17 @@ class CollectorTests(unittest.TestCase):
             collector.save_matches(connection, matches, "2026-09-08T08:15:00+00:00")
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM odds_history").fetchone()[0], 3)
             connection.close()
+
+    def test_builds_two_leg_recommendations_without_reusing_a_match(self):
+        sources = collector.flatten_matches(SAMPLE)
+        first = collector.normalized(sources[0], "2026-09-08T08:00:00+00:00")
+        second = json.loads(json.dumps(first, ensure_ascii=False))
+        second.update({"matchId": "2041346", "officialNumber": "周二002", "matchNumber": 2002, "league": "欧洲冠军联赛"})
+        recommendations = collector.build_recommendations([first, second], ["2026-09-08"])
+        self.assertLessEqual(len(recommendations["2026-09-08"]), 1)
+        if recommendations["2026-09-08"]:
+            legs = recommendations["2026-09-08"][0]["legs"]
+            self.assertNotEqual(legs[0]["matchId"], legs[1]["matchId"])
 
 
 if __name__ == "__main__":

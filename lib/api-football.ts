@@ -3,6 +3,16 @@ import { env } from 'cloudflare:workers';
 const SPORTTERY_URL = 'https://webapi.sporttery.cn/gateway/uniform/football/getMatchCalculatorV1.qry?channel=c&poolCode=had,hhad';
 
 type Odds = { h?: string; d?: string; a?: string; goalLine?: string; updateDate?: string; updateTime?: string };
+type ModelAnalysis = {
+  modelVersion?: string;
+  predictedScore?: string;
+  scoreProbabilities?: Array<{ score: string; probability: number }>;
+  predictedTotalGoals?: string;
+  totalGoalsProbabilities?: Record<string, number>;
+  under25Probability?: number;
+  over25Probability?: number;
+  expectedGoals?: { home: number; away: number; total: number };
+};
 type SportteryMatch = {
   matchId: number;
   matchNum: number;
@@ -17,6 +27,7 @@ type SportteryMatch = {
   sellStatus: string;
   had?: Odds;
   hhad?: Odds;
+  analysis?: ModelAnalysis;
 };
 type SportteryEnvelope = { success: boolean; errorCode: string; value?: { matchInfoList?: Array<{ businessDate: string; subMatchList: SportteryMatch[] }> } };
 type RelayMatch = {
@@ -32,6 +43,22 @@ type RelayMatch = {
   saleStatus: string;
   had?: Odds;
   hhad?: Odds;
+  analysis?: ModelAnalysis;
+};
+export type DashboardRecommendation = {
+  level: string;
+  combinedProbability: number;
+  combinedOdds: number;
+  legs: Array<{
+    matchId: string;
+    officialNumber: string;
+    league: string;
+    home: string;
+    away: string;
+    pick: string;
+    probability: number;
+    odds: number;
+  }>;
 };
 type RelayPayload = {
   source: string;
@@ -40,6 +67,7 @@ type RelayPayload = {
   updatedAt: string;
   count: number;
   matches: RelayMatch[];
+  recommendations?: Record<string, DashboardRecommendation[]>;
 };
 
 const VERIFIED_SNAPSHOT_2026_09_08: SportteryMatch[] = [
@@ -79,9 +107,16 @@ export type DashboardMatch = {
   riskTone: 'green' | 'amber' | 'red';
   note: string;
   saleStatus: string;
+  predictedScore: string | null;
+  scoreProbabilities: Array<{ score: string; probability: number }>;
+  predictedTotalGoals: string | null;
+  totalGoalsProbabilities: Record<string, number> | null;
+  over25Probability: number | null;
+  under25Probability: number | null;
+  expectedGoals: { home: number; away: number; total: number } | null;
 };
 
-export type DashboardData = { matches: DashboardMatch[]; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
+export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
 
 function shanghaiDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -169,6 +204,7 @@ function relayMatch(item: RelayMatch): SportteryMatch {
     sellStatus: item.saleStatus,
     had: item.had,
     hhad: item.hhad,
+    analysis: item.analysis,
   };
 }
 
@@ -204,6 +240,7 @@ export async function getDashboardData(): Promise<DashboardData> {
   let businessDate = shanghaiDate();
   let updatedAt = new Date().toISOString();
   let sourceMode: DashboardData['sourceMode'] = 'mainland_relay';
+  let recommendations: DashboardRecommendation[] = [];
   try {
     let source: SportteryMatch[] = [];
     try {
@@ -211,6 +248,7 @@ export async function getDashboardData(): Promise<DashboardData> {
       businessDate = relay.businessDate;
       updatedAt = relay.updatedAt;
       source = relay.matches.filter((item) => item.businessDate === businessDate).map(relayMatch);
+      recommendations = relay.recommendations?.[businessDate] ?? [];
       if (businessDate === '2026-09-08') {
         const merged = new Map(VERIFIED_SNAPSHOT_2026_09_08.map((item) => [item.matchId, item]));
         source.forEach((item) => merged.set(item.matchId, item));
@@ -257,11 +295,18 @@ export async function getDashboardData(): Promise<DashboardData> {
         ...riskFor(probabilities),
         note: probabilities ? `体彩官方胜平负固定奖去水后偏向${labels[strongest]}，${updateAt}。当前仅表示市场概率，不是投注保证。` : '体彩官方赛程已导入，胜平负固定奖尚未公布或暂停售。',
         saleStatus: item.sellStatus,
+        predictedScore: item.analysis?.predictedScore ?? null,
+        scoreProbabilities: item.analysis?.scoreProbabilities ?? [],
+        predictedTotalGoals: item.analysis?.predictedTotalGoals ?? null,
+        totalGoalsProbabilities: item.analysis?.totalGoalsProbabilities ?? null,
+        over25Probability: item.analysis?.over25Probability ?? null,
+        under25Probability: item.analysis?.under25Probability ?? null,
+        expectedGoals: item.analysis?.expectedGoals ?? null,
       };
     });
-    return { matches, updatedAt, businessDate, sourceMode };
+    return { matches, recommendations, updatedAt, businessDate, sourceMode };
   } catch (error) {
-    return { matches: [], updatedAt, businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
+    return { matches: [], recommendations: [], updatedAt, businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
   }
 }
 

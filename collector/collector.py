@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import gzip
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import sys
@@ -119,6 +121,86 @@ def decimal_odds(value: Any) -> float | None:
         return None
 
 
+def poisson_probabilities(rate: float, maximum: int = 10) -> list[float]:
+    values = [math.exp(-rate)]
+    for goals in range(1, maximum + 1):
+        values.append(values[-1] * rate / goals)
+    return values
+
+
+def outcome_probabilities(home_rate: float, away_rate: float) -> tuple[float, float, float]:
+    home_goals = poisson_probabilities(home_rate)
+    away_goals = poisson_probabilities(away_rate)
+    home = draw = away = 0.0
+    for home_score, home_probability in enumerate(home_goals):
+        for away_score, away_probability in enumerate(away_goals):
+            probability = home_probability * away_probability
+            if home_score > away_score:
+                home += probability
+            elif home_score == away_score:
+                draw += probability
+            else:
+                away += probability
+    total = home + draw + away
+    return home / total, draw / total, away / total
+
+
+@functools.lru_cache(maxsize=2048)
+def fit_expected_goals(target: tuple[float, float, float]) -> tuple[float, float]:
+    best = (1.35, 1.15)
+    best_error = float("inf")
+    for home_step in range(5, 81):
+        home_rate = home_step * 0.05
+        for away_step in range(5, 71):
+            away_rate = away_step * 0.05
+            model = outcome_probabilities(home_rate, away_rate)
+            total_penalty = max(0.0, home_rate + away_rate - 4.5) ** 2 * 0.01
+            error = sum((model[index] - target[index]) ** 2 for index in range(3)) + total_penalty
+            if error < best_error:
+                best_error = error
+                best = (home_rate, away_rate)
+    return best
+
+
+def score_model(probabilities: list[float]) -> dict[str, Any]:
+    home_rate, away_rate = fit_expected_goals(tuple(value / 100 for value in probabilities))
+    home_goals = poisson_probabilities(home_rate)
+    away_goals = poisson_probabilities(away_rate)
+    scores: list[tuple[int, int, float]] = []
+    for home_score, home_probability in enumerate(home_goals):
+        for away_score, away_probability in enumerate(away_goals):
+            scores.append((home_score, away_score, home_probability * away_probability * 100))
+    scores.sort(key=lambda item: item[2], reverse=True)
+    predicted_outcome = probabilities.index(max(probabilities))
+    predicted = next(
+        item for item in scores
+        if (predicted_outcome == 0 and item[0] > item[1])
+        or (predicted_outcome == 1 and item[0] == item[1])
+        or (predicted_outcome == 2 and item[0] < item[1])
+    )
+
+    total_rate = home_rate + away_rate
+    total_distribution = poisson_probabilities(total_rate, 6)
+    covered = sum(total_distribution)
+    totals = {str(index): round(value * 100, 2) for index, value in enumerate(total_distribution)}
+    totals["7+"] = round(max(0.0, 1 - covered) * 100, 2)
+    predicted_total = max(totals, key=totals.get)
+    under_25 = sum(total_distribution[:3]) * 100
+    return {
+        "modelVersion": "v1-market-poisson",
+        "expectedGoals": {"home": round(home_rate, 2), "away": round(away_rate, 2), "total": round(total_rate, 2)},
+        "predictedScore": f"{predicted[0]}-{predicted[1]}",
+        "scoreProbabilities": [
+            {"score": f"{home_score}-{away_score}", "probability": round(probability, 2)}
+            for home_score, away_score, probability in scores[:5]
+        ],
+        "predictedTotalGoals": predicted_total,
+        "totalGoalsProbabilities": totals,
+        "under25Probability": round(under_25, 2),
+        "over25Probability": round(100 - under_25, 2),
+    }
+
+
 def market_analysis(match: dict[str, Any]) -> dict[str, Any]:
     had = match.get("had") or {}
     odds = [decimal_odds(had.get(key)) for key in ("h", "d", "a")]
@@ -137,7 +219,62 @@ def market_analysis(match: dict[str, Any]) -> dict[str, Any]:
         "confidence": round(max(probabilities), 2),
         "risk": risk,
         "marketMargin": round((total - 1) * 100, 2),
+        **score_model(probabilities),
     }
+
+
+def build_recommendations(matches: list[dict[str, Any]], business_dates: list[str]) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    pick_key = {"主胜": "h", "平局": "d", "客胜": "a"}
+    for business_date in business_dates:
+        candidates: list[dict[str, Any]] = []
+        for item in matches:
+            if item.get("businessDate") != business_date:
+                continue
+            analysis = item.get("analysis") or {}
+            prediction = analysis.get("prediction")
+            confidence = float(analysis.get("confidence") or 0)
+            price = decimal_odds((item.get("had") or {}).get(pick_key.get(prediction)))
+            if prediction not in pick_key or confidence < 42 or price is None:
+                continue
+            candidates.append({
+                "matchId": item["matchId"],
+                "officialNumber": item["officialNumber"],
+                "league": item["league"],
+                "home": item["home"],
+                "away": item["away"],
+                "pick": prediction,
+                "probability": confidence,
+                "odds": price,
+                "quality": confidence - float(analysis.get("marketMargin") or 0) * 0.35,
+            })
+        pairs: list[dict[str, Any]] = []
+        for left_index, left in enumerate(candidates):
+            for right in candidates[left_index + 1:]:
+                combined_probability = left["probability"] * right["probability"] / 100
+                diversity_bonus = 2 if left["league"] != right["league"] else 0
+                score = combined_probability + diversity_bonus + (left["quality"] + right["quality"]) * 0.05
+                pairs.append({
+                    "legs": [{key: value for key, value in leg.items() if key not in {"quality"}} for leg in (left, right)],
+                    "combinedProbability": round(combined_probability, 2),
+                    "combinedOdds": round(left["odds"] * right["odds"], 2),
+                    "level": "稳健" if combined_probability >= 30 else "均衡" if combined_probability >= 23 else "观察",
+                    "_score": score,
+                })
+        pairs.sort(key=lambda item: item["_score"], reverse=True)
+        selected: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for pair in pairs:
+            identity = tuple(sorted(leg["matchId"] for leg in pair["legs"]))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            pair.pop("_score", None)
+            selected.append(pair)
+            if len(selected) == 3:
+                break
+        result[business_date] = selected
+    return result
 
 
 def official_number(match: dict[str, Any]) -> str:
@@ -260,6 +397,7 @@ def export_current(
         business_dates,
     ).fetchall()
     matches = [json.loads(row[0]) for row in rows]
+    recommendations = build_recommendations(matches, business_dates)
     atomic_json(
         output,
         {
@@ -269,6 +407,7 @@ def export_current(
             "updatedAt": collected_at,
             "count": len(matches),
             "matches": matches,
+            "recommendations": recommendations,
         },
     )
     return len(matches)

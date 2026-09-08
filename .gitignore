@@ -12,6 +12,7 @@
 /coverage
 __pycache__/
 *.py[cod]
+*.tsbuildinfo
 
 # next.js
 /.next/
