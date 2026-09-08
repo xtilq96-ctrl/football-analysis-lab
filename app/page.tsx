@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
-import { getDashboardData, type DashboardMatch } from '@/lib/api-football';
+import { getDashboardData, type DashboardMatch, type DashboardRecommendation } from '@/lib/api-football';
 
 const riskStyles = {
   green: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300',
@@ -71,6 +71,8 @@ export default async function Home() {
             <p>{data.error ? <><span className="font-medium">官方数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : data.sourceMode === 'verified_snapshot' ? <><span className="font-medium text-sky-200">已显示官方核验快照。</span> 自动采集数据暂时不可用，页面会继续重试。</> : data.sourceMode === 'mainland_relay' ? <><span className="font-medium text-sky-200">南京采集节点运行正常。</span> 每5分钟读取中国体育彩票官方数据并校验签名，已开赛场次与赔率变化持续留存。</> : <><span className="font-medium text-sky-200">官方数据已连接。</span> 场次、时间和固定奖来自中国体育彩票公开接口；概率由官方固定奖去水换算。</>}</p>
           </div>
 
+          <RecommendationPanel recommendations={data.recommendations} />
+
           {data.matches.length ? (
             <div className="space-y-4">{data.matches.map((match) => <MatchCard key={match.id} match={match} />)}</div>
           ) : (
@@ -123,7 +125,39 @@ function MatchCard({ match }: { match: DashboardMatch }) {
           <Button variant="ghost" size="sm" className="justify-self-start text-white/60 hover:bg-white/7 hover:text-white sm:justify-self-end">分析摘要 <ChevronRight className="h-4 w-4" /></Button>
         </div>
         {match.averageOdds && match.marketProbabilities && <div className="mt-4 grid gap-2 rounded-xl border border-white/7 bg-black/10 p-3 text-xs text-white/45 sm:grid-cols-3"><span>体彩胜平负 <b className="ml-1 text-white/75">{match.averageOdds.join(' / ')}</b></span><span>官方去水概率 <b className="ml-1 text-white/75">{match.marketProbabilities.join('% / ')}%</b></span><span>{match.handicapLine ? `让球 ${match.handicapLine}` : '让球'} <b className="ml-1 text-white/75">{match.handicapOdds?.join(' / ') ?? '待公布'}</b>{match.marketMargin !== null && ` · 理论返还前利润 ${match.marketMargin}%`}</span></div>}
+        {match.predictedScore && <div className="mt-3 rounded-xl border border-violet-400/12 bg-violet-400/[.055] p-3">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-white/55">
+            <span>模型比分 <b className="ml-1 text-violet-200">{match.predictedScore}</b></span>
+            <span>总进球 <b className="ml-1 text-violet-200">{match.predictedTotalGoals} 球</b></span>
+            <span>期望进球 <b className="ml-1 text-violet-200">{match.expectedGoals?.home}–{match.expectedGoals?.away}</b></span>
+            <span>大 2.5 <b className="ml-1 text-violet-200">{match.over25Probability}%</b></span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">{match.scoreProbabilities.slice(0, 3).map((score) => <Badge key={score.score} variant="outline" className="border-white/10 text-white/55">{score.score} · {score.probability}%</Badge>)}</div>
+        </div>}
         <p className="mt-4 border-t border-white/7 pt-4 text-sm leading-6 text-white/48">{match.note}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RecommendationPanel({ recommendations }: { recommendations: DashboardRecommendation[] }) {
+  return (
+    <Card className="mb-5 border-lime-300/15 bg-[linear-gradient(135deg,rgba(190,242,100,.08),rgba(255,255,255,.025))] shadow-none">
+      <CardHeader className="pb-3">
+        <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base font-medium">
+          <span className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-lime-300" />自动 2 串 1</span>
+          <span className="text-xs font-normal text-white/35">V1 市场概率 + 泊松比分模型</span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {recommendations.length ? <div className="grid gap-3 xl:grid-cols-3">{recommendations.map((recommendation, index) => (
+          <div key={recommendation.legs.map((leg) => leg.matchId).join('-')} className="rounded-xl border border-white/8 bg-black/10 p-3">
+            <div className="mb-2 flex items-center justify-between"><Badge className={index === 0 ? 'border-lime-300/20 bg-lime-300/10 text-lime-200' : 'border-white/10 bg-white/5 text-white/55'}>{index === 0 ? '首选' : `备选 ${index}`}</Badge><span className="text-xs text-white/38">{recommendation.level}</span></div>
+            <div className="space-y-2">{recommendation.legs.map((leg) => <div key={leg.matchId} className="text-sm"><p className="text-white/75">{leg.officialNumber} · {leg.pick} <span className="text-xs text-white/35">@ {leg.odds}</span></p><p className="truncate text-xs text-white/35">{leg.home} vs {leg.away} · {leg.probability}%</p></div>)}</div>
+            <div className="mt-3 flex justify-between border-t border-white/7 pt-2 text-xs text-white/40"><span>组合概率 {recommendation.combinedProbability}%</span><span>参考倍数 {recommendation.combinedOdds}</span></div>
+          </div>
+        ))}</div> : <p className="text-sm text-white/45">当前没有同时达到最低概率要求的两场组合，系统选择不推荐。</p>}
+        <p className="mt-3 text-xs leading-5 text-white/35">只在模型概率达到门槛时生成组合；概率与参考倍数用于研究和回测，不代表收益保证。</p>
       </CardContent>
     </Card>
   );
