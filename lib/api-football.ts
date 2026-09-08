@@ -59,7 +59,7 @@ async function cachedRequest<T>(path: string, ttlMs: number): Promise<T> {
     ).bind(cacheKey).first<{ payload: string; expiresAt: number }>();
     if (row) {
       stalePayload = row.payload;
-      if (row.expiresAt > now) return JSON.parse(row.payload) as T;
+      if (row.expiresAt > now) return (JSON.parse(row.payload) as ApiEnvelope<T>).response;
     }
   } catch {
     // The network request below still gives a useful result during a fresh migration.
