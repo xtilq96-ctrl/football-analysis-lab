@@ -103,37 +103,61 @@ def fetch_payload(url: str, timeout: float, retries: int = 3) -> tuple[dict[str,
     raise RuntimeError(f"fetch failed after {retries} attempts: {last_error}")
 
 
-def fetch_results(timeout: float, retries: int = 3) -> list[dict[str, Any]]:
-    now = now_shanghai()
+def fetch_results_window(
+    begin_date: str,
+    end_date: str,
+    timeout: float,
+    retries: int = 3,
+) -> list[dict[str, Any]]:
+    """Read every page from the official result archive for a date window."""
     params = urllib.parse.urlencode({
-        "matchBeginDate": (now - timedelta(days=3)).date().isoformat(),
-        "matchEndDate": now.date().isoformat(),
+        "matchBeginDate": begin_date,
+        "matchEndDate": end_date,
         "leagueId": "",
-        "pageSize": "200",
-        "pageNo": "1",
+        "pageSize": "100",
         "isFix": "0",
         "matchPage": "1",
         "pcOrWap": "1",
     })
-    url = f"{SPORTTERY_RESULTS_URL}?{params}"
     headers = {**HEADERS, "Referer": "https://www.sporttery.cn/jc/zqsgkj/"}
-    last_error: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
+    results: list[dict[str, Any]] = []
+    page = 1
+    pages = 1
+    while page <= pages:
+        last_error: Exception | None = None
+        for attempt in range(1, retries + 1):
+            url = f"{SPORTTERY_RESULTS_URL}?{params}&pageNo={page}"
             request = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                payload = json.loads(response.read())
-            if payload.get("success") is not True or str(payload.get("errorCode")) != "0":
-                raise RuntimeError("official result endpoint returned an unsuccessful payload")
-            results = payload.get("value", {}).get("matchResult", [])
-            if not isinstance(results, list):
-                raise RuntimeError("official result endpoint payload has an unexpected structure")
-            return [item for item in results if isinstance(item, dict)]
-        except (OSError, ValueError, urllib.error.URLError, RuntimeError) as error:
-            last_error = error
-            if attempt < retries:
-                time.sleep(2 ** (attempt - 1))
-    raise RuntimeError(f"result fetch failed after {retries} attempts: {last_error}")
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    payload = json.loads(response.read())
+                if payload.get("success") is not True or str(payload.get("errorCode")) != "0":
+                    raise RuntimeError("official result endpoint returned an unsuccessful payload")
+                value = payload.get("value", {})
+                items = value.get("matchResult", [])
+                if not isinstance(items, list):
+                    raise RuntimeError("official result endpoint payload has an unexpected structure")
+                results.extend(item for item in items if isinstance(item, dict))
+                pages = max(1, int(value.get("pages") or 1))
+                break
+            except (OSError, ValueError, urllib.error.URLError, RuntimeError) as error:
+                last_error = error
+                if attempt < retries:
+                    time.sleep(2 ** (attempt - 1))
+        else:
+            raise RuntimeError(f"result fetch failed after {retries} attempts: {last_error}")
+        page += 1
+    return results
+
+
+def fetch_results(timeout: float, retries: int = 3) -> list[dict[str, Any]]:
+    now = now_shanghai()
+    return fetch_results_window(
+        (now - timedelta(days=7)).date().isoformat(),
+        now.date().isoformat(),
+        timeout,
+        retries,
+    )
 
 
 def api_football_request(
@@ -571,7 +595,11 @@ def blend_fundamentals(base: dict[str, Any], fundamentals: dict[str, Any]) -> di
     return {
         **base,
         **score_model(values),
-        "modelVersion": "v2-market-fundamentals",
+        "modelVersion": (
+            "v2-market-official-history"
+            if fundamentals.get("source") == "sporttery_history"
+            else "v2-market-fundamentals"
+        ),
         "marketProbabilities": market,
         "probabilities": dict(zip(("home", "draw", "away"), values)),
         "prediction": labels[values.index(max(values))],
@@ -652,6 +680,8 @@ def normalized(match: dict[str, Any], collected_at: str) -> dict[str, Any]:
         "league": str(match.get("leagueAllName") or ""),
         "home": str(match.get("homeTeamAllName") or ""),
         "away": str(match.get("awayTeamAllName") or ""),
+        "homeTeamId": int(match.get("homeTeamId") or 0),
+        "awayTeamId": int(match.get("awayTeamId") or 0),
         "homeTeamCode": str(match.get("homeTeamCode") or ""),
         "awayTeamCode": str(match.get("awayTeamCode") or ""),
         "homeTeamEn": str(match.get("homeTeamAbbEnName") or ""),
@@ -706,6 +736,28 @@ CREATE TABLE IF NOT EXISTS api_cache (
   fetched_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS collector_state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS official_match_history (
+  match_id TEXT PRIMARY KEY,
+  match_date TEXT NOT NULL,
+  league_id INTEGER NOT NULL DEFAULT 0,
+  league_name TEXT NOT NULL,
+  home_team_id INTEGER NOT NULL,
+  away_team_id INTEGER NOT NULL,
+  home_team_name TEXT NOT NULL,
+  away_team_name TEXT NOT NULL,
+  home_goals INTEGER NOT NULL,
+  away_goals INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS official_history_home_date
+  ON official_match_history(home_team_id,match_date);
+CREATE INDEX IF NOT EXISTS official_history_away_date
+  ON official_match_history(away_team_id,match_date);
 CREATE TABLE IF NOT EXISTS locked_predictions (
   match_id TEXT PRIMARY KEY,
   payload TEXT NOT NULL,
@@ -796,6 +848,189 @@ def save_matches(connection: sqlite3.Connection, matches: Iterable[dict[str, Any
     return count
 
 
+def save_official_history(
+    connection: sqlite3.Connection,
+    results: Iterable[dict[str, Any]],
+    updated_at: str,
+) -> int:
+    """Persist completed official results as the free long-term form dataset."""
+    count = 0
+    with connection:
+        for result in results:
+            score = str(result.get("sectionsNo999") or "")
+            if str(result.get("matchResultStatus")) != "2" or ":" not in score:
+                continue
+            try:
+                home_goals, away_goals = (int(value) for value in score.split(":", 1))
+                home_team_id = int(result.get("homeTeamId") or 0)
+                away_team_id = int(result.get("awayTeamId") or 0)
+            except (TypeError, ValueError):
+                continue
+            match_id = str(result.get("matchId") or "")
+            match_date = str(result.get("matchDate") or "")
+            if not match_id or not match_date or not home_team_id or not away_team_id:
+                continue
+            connection.execute(
+                """INSERT INTO official_match_history
+                   (match_id,match_date,league_id,league_name,home_team_id,away_team_id,
+                    home_team_name,away_team_name,home_goals,away_goals,payload,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(match_id) DO UPDATE SET
+                     match_date=excluded.match_date,league_id=excluded.league_id,
+                     league_name=excluded.league_name,home_team_id=excluded.home_team_id,
+                     away_team_id=excluded.away_team_id,home_team_name=excluded.home_team_name,
+                     away_team_name=excluded.away_team_name,home_goals=excluded.home_goals,
+                     away_goals=excluded.away_goals,payload=excluded.payload,
+                     updated_at=excluded.updated_at""",
+                (
+                    match_id, match_date, int(result.get("leagueId") or 0),
+                    str(result.get("leagueName") or ""), home_team_id, away_team_id,
+                    str(result.get("allHomeTeam") or result.get("homeTeam") or ""),
+                    str(result.get("allAwayTeam") or result.get("awayTeam") or ""),
+                    home_goals, away_goals,
+                    json.dumps(result, ensure_ascii=False, separators=(",", ":")), updated_at,
+                ),
+            )
+            count += 1
+    return count
+
+
+def sync_official_history(
+    connection: sqlite3.Connection,
+    timeout: float,
+    retries: int,
+    lookback_days: int = 120,
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Refresh seven days each run and rebuild 120 days at most once per day."""
+    now = now_shanghai()
+    state = connection.execute(
+        "SELECT value FROM collector_state WHERE key='official_history_full_sync_at'"
+    ).fetchone()
+    full_sync = True
+    if state:
+        with contextlib.suppress(ValueError):
+            full_sync = datetime.fromisoformat(state[0]) < datetime.now(timezone.utc) - timedelta(hours=24)
+    begin = now - timedelta(days=lookback_days if full_sync else 7)
+    results: list[dict[str, Any]] = []
+    cursor = begin.date()
+    end = now.date()
+    while cursor <= end:
+        chunk_end = min(cursor + timedelta(days=29), end)
+        results.extend(fetch_results_window(
+            cursor.isoformat(), chunk_end.isoformat(), timeout, retries
+        ))
+        cursor = chunk_end + timedelta(days=1)
+    saved = save_official_history(connection, results, utc_iso())
+    if full_sync:
+        with connection:
+            connection.execute(
+                """INSERT INTO collector_state(key,value) VALUES ('official_history_full_sync_at',?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
+    return results, saved, full_sync
+
+
+def official_history_form_summary(
+    connection: sqlite3.Connection,
+    team_id: int,
+    venue: str,
+    kickoff: datetime,
+) -> dict[str, Any]:
+    rows = connection.execute(
+        """SELECT match_date,home_team_id,away_team_id,home_goals,away_goals
+           FROM official_match_history
+           WHERE (home_team_id=? OR away_team_id=?) AND match_date < ?
+           ORDER BY match_date DESC,match_id DESC LIMIT 40""",
+        (team_id, team_id, kickoff.date().isoformat()),
+    ).fetchall()
+
+    def calculate(items: list[tuple[Any, ...]]) -> dict[str, Any]:
+        wins = draws = losses = goals_for = goals_against = clean_sheets = 0
+        form: list[str] = []
+        for _date, home_id, _away_id, home_goals, away_goals in items:
+            is_home = int(home_id) == team_id
+            scored = int(home_goals) if is_home else int(away_goals)
+            conceded = int(away_goals) if is_home else int(home_goals)
+            goals_for += scored
+            goals_against += conceded
+            clean_sheets += int(conceded == 0)
+            if scored > conceded:
+                wins += 1
+                form.append("W")
+            elif scored == conceded:
+                draws += 1
+                form.append("D")
+            else:
+                losses += 1
+                form.append("L")
+        games = len(items)
+        return {
+            "matches": games, "wins": wins, "draws": draws, "losses": losses,
+            "pointsPerGame": round((wins * 3 + draws) / games, 2) if games else None,
+            "goalsForPerGame": round(goals_for / games, 2) if games else None,
+            "goalsAgainstPerGame": round(goals_against / games, 2) if games else None,
+            "cleanSheetRate": round(clean_sheets / games * 100, 1) if games else None,
+            "form": "".join(form),
+        }
+
+    recent = rows[:10]
+    venue_index = 1 if venue == "home" else 2
+    venue_games = [row for row in recent if int(row[venue_index]) == team_id][:5]
+    summary = calculate(recent)
+    summary["venue"] = calculate(venue_games)
+    if recent:
+        last_date = datetime.fromisoformat(str(recent[0][0])).replace(tzinfo=SHANGHAI)
+        summary["restDays"] = max(0, (kickoff.date() - last_date.date()).days)
+    else:
+        summary["restDays"] = None
+    summary["matchesLast14Days"] = sum(
+        1 for row in rows
+        if 0 <= (kickoff.date() - datetime.fromisoformat(str(row[0])).date()).days <= 14
+    )
+    return summary
+
+
+def official_history_fundamentals(
+    connection: sqlite3.Connection,
+    item: dict[str, Any],
+    collected_at: str,
+) -> dict[str, Any]:
+    kickoff = parse_kickoff(item) or now_shanghai()
+    home_id = int(item.get("homeTeamId") or 0)
+    away_id = int(item.get("awayTeamId") or 0)
+    home_form = official_history_form_summary(connection, home_id, "home", kickoff) if home_id else official_history_form_summary(connection, -1, "home", kickoff)
+    away_form = official_history_form_summary(connection, away_id, "away", kickoff) if away_id else official_history_form_summary(connection, -1, "away", kickoff)
+    ready_sides = int(bool(home_form.get("matches"))) + int(bool(away_form.get("matches")))
+
+    def team_payload(team_id: int, name: str, form: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "teamId": team_id, "apiName": name, "form": form,
+            "absences": {
+                "total": 0, "injuries": 0, "suspensions": 0, "players": [],
+                "available": False,
+            },
+            "lineup": {
+                "confirmed": False, "formation": None, "startingCount": 0,
+                "available": False,
+            },
+        }
+
+    return {
+        "status": "partial" if ready_sides else "unmatched",
+        "coverage": 4 if ready_sides == 2 else 2 if ready_sides == 1 else 0,
+        "source": "sporttery_history",
+        "sourceLabel": "中国体彩官方历史赛果",
+        "dataUpdatedAt": collected_at,
+        "message": (
+            "已使用体彩官方历史样本；伤停和首发等待专业数据源"
+            if ready_sides else "体彩历史样本不足，继续使用市场概率"
+        ),
+        "home": team_payload(home_id, str(item.get("home") or ""), home_form),
+        "away": team_payload(away_id, str(item.get("away") or ""), away_form),
+    }
+
+
 def enrich_fundamentals(
     connection: sqlite3.Connection,
     api_key: str,
@@ -806,6 +1041,7 @@ def enrich_fundamentals(
 ) -> dict[str, int]:
     """Attach API-Football fundamentals and freeze each prediction at its deadline."""
     if not api_key:
+        enriched_count = 0
         with connection:
             rows = connection.execute("SELECT match_id,payload FROM current_matches").fetchall()
             for match_id, payload in rows:
@@ -819,15 +1055,21 @@ def enrich_fundamentals(
                     item["analysis"] = frozen.get("analysis", item["analysis"])
                     item["fundamentals"] = frozen.get("fundamentals")
                 else:
-                    item["fundamentals"] = {
-                        "status": "not_configured", "coverage": 0,
-                        "message": "API-Football 尚未配置",
-                    }
+                    fundamentals = official_history_fundamentals(connection, item, collected_at)
+                    item["analysis"] = blend_fundamentals(item["analysis"], fundamentals)
+                    item["fundamentals"] = fundamentals
+                    enriched_count += int(fundamentals["coverage"] == 4)
+                    if item["analysisSchedule"]["isLocked"]:
+                        frozen = {"analysis": item["analysis"], "fundamentals": fundamentals}
+                        connection.execute(
+                            "INSERT OR IGNORE INTO locked_predictions(match_id,payload,locked_at) VALUES (?,?,?)",
+                            (match_id, json.dumps(frozen, ensure_ascii=False, separators=(",", ":")), collected_at),
+                        )
                 connection.execute(
                     "UPDATE current_matches SET payload=? WHERE match_id=?",
                     (json.dumps(item, ensure_ascii=False, separators=(",", ":")), match_id),
                 )
-        return {"matched": 0, "enriched": 0, "lineups": 0}
+        return {"matched": enriched_count, "enriched": enriched_count, "lineups": 0}
 
     normalized_by_id = {
         str(source["matchId"]): normalized(source, collected_at) for source in source_matches
@@ -890,10 +1132,10 @@ def enrich_fundamentals(
             item["analysisSchedule"] = schedule
             mapping = mapped.get(match_id)
             if not mapping:
-                item["fundamentals"] = {
-                    "status": "unmatched", "coverage": 0,
-                    "message": "未达到安全匹配阈值，未使用基本面调整",
-                }
+                fundamentals = official_history_fundamentals(connection, item, collected_at)
+                item["analysis"] = blend_fundamentals(item["analysis"], fundamentals)
+                item["fundamentals"] = fundamentals
+                enriched_count += int(fundamentals["coverage"] == 4)
             else:
                 fixture, confidence = mapping
                 fixture_meta = fixture.get("fixture") or {}
@@ -922,6 +1164,8 @@ def enrich_fundamentals(
                 fundamentals = {
                     "status": "ready" if coverage == 6 else "partial",
                     "coverage": coverage,
+                    "source": "api_football",
+                    "sourceLabel": "API-Football 专业比赛数据",
                     "mappingConfidence": confidence,
                     "fixtureId": fixture_id,
                     "dataUpdatedAt": collected_at,
@@ -1239,8 +1483,20 @@ def run_once(args: argparse.Namespace) -> int:
             )
             result_count = settled_count = 0
             result_error = None
+            history_saved = 0
+            history_full_sync = False
             fundamental_stats = {"matched": 0, "enriched": 0, "lineups": 0}
             fundamental_error = None
+            try:
+                official_results, history_saved, history_full_sync = sync_official_history(
+                    connection, args.timeout, args.retries
+                )
+                result_count, settled_count = settle_match_results(
+                    connection, official_results, collected_at
+                )
+            except Exception as error:
+                result_error = str(error)
+                logging.warning("official history/result sync skipped: %s", error)
             try:
                 fundamental_stats = enrich_fundamentals(
                     connection, args.api_football_key, matches, collected_at,
@@ -1263,22 +1519,20 @@ def run_once(args: argparse.Namespace) -> int:
                             item["analysis"] = frozen.get("analysis", item["analysis"])
                             item["fundamentals"] = frozen.get("fundamentals")
                         else:
-                            item["fundamentals"] = {
-                                "status": "api_error", "coverage": 0,
-                                "message": "API-Football 服务暂不可用，继续使用体彩市场模型",
-                            }
+                            fundamentals = official_history_fundamentals(
+                                connection, item, collected_at
+                            )
+                            fundamentals["message"] = (
+                                "专业数据源暂不可用，已自动改用体彩官方历史样本"
+                                if fundamentals["coverage"] else
+                                "专业数据源暂不可用且历史样本不足，继续使用市场概率"
+                            )
+                            item["analysis"] = blend_fundamentals(item["analysis"], fundamentals)
+                            item["fundamentals"] = fundamentals
                         connection.execute(
                             "UPDATE current_matches SET payload=? WHERE match_id=?",
                             (json.dumps(item, ensure_ascii=False, separators=(",", ":")), match_id),
                         )
-            try:
-                official_results = fetch_results(args.timeout, args.retries)
-                result_count, settled_count = settle_match_results(
-                    connection, official_results, collected_at
-                )
-            except Exception as error:
-                result_error = str(error)
-                logging.warning("result settlement skipped: %s", error)
             retained_count = export_current(
                 connection, data_dir / "latest.json", collected_at, live_business_dates
             )
@@ -1287,9 +1541,11 @@ def run_once(args: argparse.Namespace) -> int:
                 "status": "ok", "checkedAt": collected_at, "liveMatchCount": live_count,
                 "retainedMatchCount": retained_count, "businessDates": live_business_dates,
                 "officialCompletedCount": result_count, "settledPredictionCount": settled_count,
+                "officialHistorySavedCount": history_saved,
+                "officialHistoryFullSync": history_full_sync,
                 "resultStatus": "ok" if result_error is None else "warning",
                 "fundamentalStatus": (
-                    "not_configured" if not args.api_football_key else
+                    ("warning" if result_error else "official_history") if not args.api_football_key else
                     "warning" if fundamental_error else "ok"
                 ),
                 "fundamentalMatchedCount": fundamental_stats["matched"],

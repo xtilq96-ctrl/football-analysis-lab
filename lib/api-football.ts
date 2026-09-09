@@ -25,12 +25,14 @@ type TeamForm = {
 type TeamFundamentals = {
   apiName: string;
   form: TeamForm;
-  absences: { total: number; injuries: number; suspensions: number; players: Array<{ name: string; reason: string }> };
-  lineup: { confirmed: boolean; formation?: string | null; startingCount: number };
+  absences: { total: number; injuries: number; suspensions: number; players: Array<{ name: string; reason: string }>; available?: boolean };
+  lineup: { confirmed: boolean; formation?: string | null; startingCount: number; available?: boolean };
 };
 type Fundamentals = {
   status: 'ready' | 'partial' | 'unmatched' | 'not_configured' | 'api_error';
   coverage: number;
+  source?: 'sporttery_history' | 'api_football';
+  sourceLabel?: string;
   mappingConfidence?: number;
   message?: string;
   home?: TeamFundamentals;
@@ -376,7 +378,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         goals: hhad?.length ? `让球 ${item.hhad?.goalLine || '0'}` : '让球待公布',
         confidence: probabilities ? Math.max(...probabilities) : null,
         ...riskFor(probabilities),
-        note: probabilities ? `${item.analysis?.modelVersion === 'v2-market-fundamentals' ? 'V2 已综合近期状态、主客场、攻防、赛程与人员信息' : '当前使用体彩市场概率'}，结果偏向${labels[strongest]}，${updateAt}。概率分析不代表结果保证。` : '体彩官方赛程已导入，胜平负固定奖尚未公布或暂停售。',
+        note: probabilities ? `${item.analysis?.modelVersion === 'v2-market-fundamentals' ? 'V2 已综合近期状态、主客场、攻防、赛程与人员信息' : item.analysis?.modelVersion === 'v2-market-official-history' ? 'V2 已综合体彩官方历史状态、主客场攻防和赛程' : '当前使用体彩市场概率'}，结果偏向${labels[strongest]}，${updateAt}。概率分析不代表结果保证。` : '体彩官方赛程已导入，胜平负固定奖尚未公布或暂停售。',
         saleStatus: item.sellStatus,
         predictedScore: item.analysis?.predictedScore ?? null,
         scoreProbabilities: item.analysis?.scoreProbabilities ?? [],

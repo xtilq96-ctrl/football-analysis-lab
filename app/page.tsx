@@ -22,7 +22,7 @@ export default async function Home() {
   const predicted = data.matches.filter((match) => match.probabilities).length;
   const withOdds = data.matches.filter((match) => match.marketProbabilities).length;
   const completeness = data.matches.length ? Math.round((predicted / data.matches.length) * 100) : 0;
-  const fundamentalsReady = data.matches.filter((match) => match.fundamentals?.home && match.fundamentals?.away).length;
+  const fundamentalsReady = data.matches.filter((match) => (match.fundamentals?.coverage ?? 0) >= 4).length;
   const lineupsReady = data.matches.filter((match) => match.fundamentals?.home?.lineup.confirmed && match.fundamentals?.away?.lineup.confirmed).length;
   const fundamentalCompleteness = data.matches.length ? Math.round((fundamentalsReady / data.matches.length) * 100) : 0;
   const numberRange = data.matches.length
@@ -90,7 +90,8 @@ export default async function Home() {
               <StatusRow label="体彩官方赛程" value={data.error ? '重试中' : '已导入'} meta={`${data.matches.length} 场 · ${updatedAt}`} muted={Boolean(data.error)} />
               <StatusRow label="官方固定奖" value={withOdds ? '已接入' : '等待中'} meta={`${withOdds}/${data.matches.length} 场`} muted={!withOdds} />
               <StatusRow label="去水概率" value={predicted ? '已生成' : '等待中'} meta={`${predicted}/${data.matches.length} 场`} muted={!predicted} />
-              <StatusRow label="球队基本面" value={fundamentalsReady ? '已接入' : '匹配中'} meta={`${fundamentalsReady}/${data.matches.length} 场 · 首发 ${lineupsReady} 场`} muted={!fundamentalsReady} />
+              <StatusRow label="体彩历史基本面" value={fundamentalsReady ? '已生成' : '回填中'} meta={`${fundamentalsReady}/${data.matches.length} 场 · 近120天样本`} muted={!fundamentalsReady} />
+              <StatusRow label="伤停与临场首发" value={lineupsReady ? '已确认' : '等待专业源'} meta={`${lineupsReady} 场双方首发确认`} muted={!lineupsReady} />
               <StatusRow label="赛果自动结算" value={data.performance.settledMatches ? '已运行' : '等待完赛'} meta={`${data.performance.settledMatches} 场已核对`} muted={!data.performance.settledMatches} />
               <StatusRow label="数据模式" value={data.sourceMode === 'mainland_relay' ? '大陆自动采集' : data.sourceMode === 'live' ? '官方直连' : '官方快照'} meta={data.sourceMode === 'mainland_relay' ? '每 5 分钟更新' : data.sourceMode === 'live' ? '实时读取' : '自动恢复中'} muted={data.sourceMode === 'verified_snapshot'} />
             </CardContent>
@@ -99,7 +100,7 @@ export default async function Home() {
             <CardContent className="p-5">
               <div className="flex items-center justify-between"><p className="text-sm font-medium text-white/75">V2 基本面覆盖</p><span className="text-xl font-semibold text-lime-300">{fundamentalCompleteness}</span></div>
               <Progress value={fundamentalCompleteness} className="mt-3 h-1.5 bg-white/8 [&_[data-slot=progress-indicator]]:bg-lime-300" />
-              <p className="mt-3 text-xs leading-5 text-white/40">已接入近期状态、主客场攻防、休息天数、伤停停赛和临场首发；未安全匹配的场次不会强行调整概率。</p>
+              <p className="mt-3 text-xs leading-5 text-white/40">免费层使用中国体彩官方历史赛果计算近期状态、主客场攻防和赛程；伤停、停赛及首发缺失时会明确标记，不会猜测。</p>
             </CardContent>
           </Card>
           <Card className="border-white/8 bg-white/[.035] shadow-none">
@@ -149,7 +150,7 @@ function MatchCard({ match }: { match: DashboardMatch }) {
           <div className="mt-2 flex flex-wrap gap-1.5">{match.scoreProbabilities.slice(0, 3).map((score) => <Badge key={score.score} variant="outline" className="border-white/10 text-white/55">{score.score} · {score.probability}%</Badge>)}</div>
         </div>}
         {match.fundamentals?.home && match.fundamentals?.away ? <div className="mt-3 rounded-xl border border-sky-400/12 bg-sky-400/[.045] p-3">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium text-sky-200">V2 球队基本面 · 覆盖 {match.fundamentals.coverage}/6</span><span className="text-white/35">{match.analysisSchedule ? `最终分析 ${match.analysisSchedule.finalAnalysisAt.slice(11, 16)} · 锁定 ${match.analysisSchedule.lockAt.slice(11, 16)}` : ''}</span></div>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium text-sky-200">V2 球队基本面 · 覆盖 {match.fundamentals.coverage}/6 · {match.fundamentals.sourceLabel ?? '多源数据'}</span><span className="text-white/35">{match.analysisSchedule ? `最终分析 ${match.analysisSchedule.finalAnalysisAt.slice(11, 16)} · 锁定 ${match.analysisSchedule.lockAt.slice(11, 16)}` : ''}</span></div>
           <div className="grid gap-3 sm:grid-cols-2"><TeamFormPanel name={match.home} team={match.fundamentals.home} /><TeamFormPanel name={match.away} team={match.fundamentals.away} /></div>
           {match.fundamentals.probabilityAdjustmentPoints && <p className="mt-3 border-t border-white/7 pt-2 text-xs text-white/40">基本面概率修正：主胜 {signed(match.fundamentals.probabilityAdjustmentPoints.home)} · 平局 {signed(match.fundamentals.probabilityAdjustmentPoints.draw)} · 客胜 {signed(match.fundamentals.probabilityAdjustmentPoints.away)} 个百分点</p>}
         </div> : match.fundamentals && <div className="mt-3 rounded-xl border border-amber-400/12 bg-amber-400/[.04] p-3 text-xs text-amber-100/55">基本面数据：{match.fundamentals.message ?? '正在安全匹配球队，暂不调整市场概率。'}</div>}
@@ -198,8 +199,8 @@ function TeamFormPanel({ name, team }: { name: string; team: NonNullable<NonNull
       <span>零封率 <b className="text-white/70">{form.cleanSheetRate ?? '—'}%</b></span>
       <span>休息 <b className="text-white/70">{form.restDays ?? '—'} 天</b></span>
       <span>14天赛程 <b className="text-white/70">{form.matchesLast14Days} 场</b></span>
-      <span>伤停/停赛 <b className="text-white/70">{team.absences.injuries}/{team.absences.suspensions}</b></span>
-      <span>首发 <b className={team.lineup.confirmed ? 'text-emerald-300' : 'text-amber-300'}>{team.lineup.confirmed ? `已确认${team.lineup.formation ? ` · ${team.lineup.formation}` : ''}` : '未公布'}</b></span>
+      <span>伤停/停赛 <b className="text-white/70">{team.absences.available === false ? '等待专业源' : `${team.absences.injuries}/${team.absences.suspensions}`}</b></span>
+      <span>首发 <b className={team.lineup.confirmed ? 'text-emerald-300' : 'text-amber-300'}>{team.lineup.confirmed ? `已确认${team.lineup.formation ? ` · ${team.lineup.formation}` : ''}` : team.lineup.available === false ? '等待专业源' : '未公布'}</b></span>
     </div>
   </div>;
 }

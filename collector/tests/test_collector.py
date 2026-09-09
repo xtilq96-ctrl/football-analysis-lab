@@ -200,6 +200,39 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(adjusted["modelVersion"], "v2-market-fundamentals")
         self.assertGreater(adjusted["probabilities"]["home"], base["probabilities"]["home"])
 
+    def test_builds_form_from_official_sporttery_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = collector.connect_database(Path(directory) / "test.sqlite3")
+            results = []
+            for index, score in enumerate([(2, 0), (1, 1), (0, 1), (3, 0), (1, 0)]):
+                results.append({
+                    "matchId": 9000 + index,
+                    "matchDate": f"2026-08-{30 - index:02d}",
+                    "matchResultStatus": "2",
+                    "sectionsNo999": f"{score[0]}:{score[1]}",
+                    "homeTeamId": 1192,
+                    "awayTeamId": 8000 + index,
+                    "allHomeTeam": "江原FC",
+                    "allAwayTeam": f"对手{index}",
+                    "leagueId": 48,
+                    "leagueName": "韩国职业联赛",
+                })
+            saved = collector.save_official_history(
+                connection, results, "2026-09-01T00:00:00+00:00"
+            )
+            self.assertEqual(saved, 5)
+            summary = collector.official_history_form_summary(
+                connection,
+                1192,
+                "home",
+                collector.datetime(2026, 9, 8, 18, 30, tzinfo=collector.SHANGHAI),
+            )
+            self.assertEqual(summary["matches"], 5)
+            self.assertEqual(summary["wins"], 3)
+            self.assertEqual(summary["cleanSheetRate"], 60.0)
+            self.assertEqual(summary["restDays"], 9)
+            connection.close()
+
 
 if __name__ == "__main__":
     unittest.main()
