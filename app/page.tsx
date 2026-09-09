@@ -2,6 +2,7 @@ import {
   Activity, BarChart3, Bell, CalendarDays, ChevronRight, CircleAlert, Clock3,
   Database, Gauge, ShieldCheck, Sparkles, Trophy,
 } from 'lucide-react';
+import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -47,11 +48,11 @@ export default async function Home() {
       <div className="mx-auto grid max-w-[1440px] gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[220px_minmax(0,1fr)_300px] lg:px-8 lg:py-8">
         <aside className="hidden lg:block">
           <nav className="sticky top-24 space-y-1" aria-label="主要导航">
-            <NavItem icon={<Sparkles />} label="今日分析" active />
-            <NavItem icon={<CalendarDays />} label="赛程中心" />
-            <NavItem icon={<BarChart3 />} label="模型评估" />
-            <NavItem icon={<Gauge />} label="策略实验室" />
-            <NavItem icon={<Database />} label="数据与任务" />
+            <NavItem href="/" icon={<Sparkles />} label="今日分析" active />
+            <NavItem href="/schedule" icon={<CalendarDays />} label="赛程中心" />
+            <NavItem href="/evaluation" icon={<BarChart3 />} label="模型评估" />
+            <NavItem href="/lab" icon={<Gauge />} label="策略实验室" />
+            <NavItem href="/system" icon={<Database />} label="数据与任务" />
           </nav>
           <div className="mt-8 rounded-2xl border border-white/8 bg-white/[.025] p-4">
             <div className="flex items-center gap-2 text-sm font-medium text-white/80"><ShieldCheck className="h-4 w-4 text-lime-300" />研究模式</div>
@@ -116,8 +117,8 @@ export default async function Home() {
         </aside>
       </div>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-white/8 bg-[#07110d]/95 px-2 pb-[max(.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl lg:hidden" aria-label="移动端导航">
-        <MobileNav icon={<Sparkles />} label="今日" active /><MobileNav icon={<CalendarDays />} label="赛程" /><MobileNav icon={<BarChart3 />} label="评估" /><MobileNav icon={<Database />} label="系统" />
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-white/8 bg-[#07110d]/95 px-2 pb-[max(.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl lg:hidden" aria-label="移动端导航">
+        <MobileNav href="/" icon={<Sparkles />} label="今日" active /><MobileNav href="/schedule" icon={<CalendarDays />} label="赛程" /><MobileNav href="/evaluation" icon={<BarChart3 />} label="评估" /><MobileNav href="/lab" icon={<Gauge />} label="策略" /><MobileNav href="/system" icon={<Database />} label="系统" />
       </nav>
     </main>
   );
@@ -137,7 +138,7 @@ function MatchCard({ match }: { match: DashboardMatch }) {
           <div>
             {match.probabilities ? <><div className="mb-2 flex justify-between text-xs text-white/45"><span>主胜 <b className="ml-1 font-semibold text-white/85">{home}%</b></span><span>平局 <b className="ml-1 font-semibold text-white/85">{draw}%</b></span><span>客胜 <b className="ml-1 font-semibold text-white/85">{away}%</b></span></div><div className="flex h-2 overflow-hidden rounded-full bg-white/5"><span className="bg-lime-300" style={{ width: `${home}%` }} /><span className="bg-sky-400" style={{ width: `${draw}%` }} /><span className="bg-violet-400" style={{ width: `${away}%` }} /></div></> : <p className="text-sm text-white/35">预测数据等待下一次同步</p>}
           </div>
-          <Button variant="ghost" size="sm" className="justify-self-start text-white/60 hover:bg-white/7 hover:text-white sm:justify-self-end">分析摘要 <ChevronRight className="h-4 w-4" /></Button>
+          <Link href={`/schedule#match-${match.id}`} className="inline-flex h-8 items-center justify-self-start rounded-md px-3 text-sm text-white/60 hover:bg-white/7 hover:text-white sm:justify-self-end">分析摘要 <ChevronRight className="ml-1 h-4 w-4" /></Link>
         </div>
         {match.averageOdds && match.marketProbabilities && <div className="mt-4 grid gap-2 rounded-xl border border-white/7 bg-black/10 p-3 text-xs text-white/45 sm:grid-cols-3"><span>体彩胜平负 <b className="ml-1 text-white/75">{match.averageOdds.join(' / ')}</b></span><span>官方去水概率 <b className="ml-1 text-white/75">{match.marketProbabilities.join('% / ')}%</b></span><span>{match.handicapLine ? `让球 ${match.handicapLine}` : '让球'} <b className="ml-1 text-white/75">{match.handicapOdds?.join(' / ') ?? '待公布'}</b>{match.marketMargin !== null && ` · 理论返还前利润 ${match.marketMargin}%`}</span></div>}
         {match.predictedScore && <div className="mt-3 rounded-xl border border-violet-400/12 bg-violet-400/[.055] p-3">
@@ -205,12 +206,12 @@ function TeamFormPanel({ name, team }: { name: string; team: NonNullable<NonNull
   </div>;
 }
 
-function NavItem({ icon, label, active = false }: { icon: React.ReactNode; label: string; active?: boolean }) {
-  return <button className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${active ? 'bg-lime-300 font-medium text-[#07110d]' : 'text-white/50 hover:bg-white/5 hover:text-white/85'}`}><span className="[&>svg]:h-[17px] [&>svg]:w-[17px]">{icon}</span>{label}</button>;
+function NavItem({ href, icon, label, active = false }: { href: string; icon: React.ReactNode; label: string; active?: boolean }) {
+  return <Link href={href} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${active ? 'bg-lime-300 font-medium text-[#07110d]' : 'text-white/50 hover:bg-white/5 hover:text-white/85'}`}><span className="[&>svg]:h-[17px] [&>svg]:w-[17px]">{icon}</span>{label}</Link>;
 }
 
-function MobileNav({ icon, label, active = false }: { icon: React.ReactNode; label: string; active?: boolean }) {
-  return <button className={`flex flex-col items-center gap-1 text-[11px] ${active ? 'text-lime-300' : 'text-white/40'}`}><span className="[&>svg]:h-5 [&>svg]:w-5">{icon}</span>{label}</button>;
+function MobileNav({ href, icon, label, active = false }: { href: string; icon: React.ReactNode; label: string; active?: boolean }) {
+  return <Link href={href} className={`flex flex-col items-center gap-1 text-[11px] ${active ? 'text-lime-300' : 'text-white/40'}`}><span className="[&>svg]:h-5 [&>svg]:w-5">{icon}</span>{label}</Link>;
 }
 
 function StatusRow({ label, value, meta, muted = false }: { label: string; value: string; meta: string; muted?: boolean }) {
