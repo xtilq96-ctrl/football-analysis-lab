@@ -263,14 +263,8 @@ function fromHex(value: string) {
   return Uint8Array.from(value.match(/.{2}/g) ?? [], (byte) => Number.parseInt(byte, 16));
 }
 
-async function verifiedRelayData(): Promise<RelayPayload> {
-  const relayUrl = env.FOOTBALL_AI_RELAY_URL;
-  const relaySecret = env.FOOTBALL_AI_RELAY_SECRET;
-  if (!relayUrl || !relaySecret) throw new Error('大陆采集节点尚未配置');
-  const response = await fetch(relayUrl, { headers: { Accept: 'application/json' }, cache: 'no-store' });
-  if (!response.ok) throw new Error(`大陆采集节点返回 ${response.status}`);
-  const body = await response.text();
-  const signature = fromHex(response.headers.get('X-Football-Signature') ?? '');
+async function verifyRelayBody(body: string, signatureValue: string, relaySecret: string): Promise<RelayPayload> {
+  const signature = fromHex(signatureValue);
   if (!signature) throw new Error('大陆采集节点签名缺失');
   const key = await crypto.subtle.importKey(
     'raw', new TextEncoder().encode(relaySecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'],
@@ -284,6 +278,28 @@ async function verifiedRelayData(): Promise<RelayPayload> {
   const age = Date.now() - Date.parse(payload.updatedAt);
   if (!Number.isFinite(age) || age < -5 * 60_000 || age > 20 * 60_000) throw new Error('大陆采集节点数据已过期');
   return payload;
+}
+
+async function verifiedRelayData(): Promise<RelayPayload> {
+  const relayUrl = env.FOOTBALL_AI_RELAY_URL;
+  const relaySecret = env.FOOTBALL_AI_RELAY_SECRET;
+  if (!relaySecret) throw new Error('大陆采集节点尚未配置');
+  try {
+    const cached = await env.DB.prepare(
+      'SELECT payload FROM api_cache WHERE cache_key = ?1 AND expires_at > ?2',
+    ).bind('football-ai:relay-push', Date.now()).first<{ payload: string }>();
+    if (cached?.payload) {
+      const envelope = JSON.parse(cached.payload) as { body?: string; signature?: string };
+      if (envelope.body && envelope.signature) return await verifyRelayBody(envelope.body, envelope.signature, relaySecret);
+    }
+  } catch (cacheError) {
+    console.warn('pushed relay cache unavailable', cacheError instanceof Error ? cacheError.message : 'unknown cache error');
+  }
+  if (!relayUrl) throw new Error('大陆采集节点尚未配置');
+  const response = await fetch(relayUrl, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+  if (!response.ok) throw new Error(`大陆采集节点返回 ${response.status}`);
+  const body = await response.text();
+  return verifyRelayBody(body, response.headers.get('X-Football-Signature') ?? '', relaySecret);
 }
 
 function relayMatch(item: RelayMatch): SportteryMatch {

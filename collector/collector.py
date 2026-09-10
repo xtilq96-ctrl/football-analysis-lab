@@ -81,6 +81,48 @@ def atomic_json(path: Path, value: Any) -> None:
             os.unlink(temp_name)
 
 
+def push_latest_to_site(
+    path: Path,
+    url: str,
+    auth_token: str,
+    relay_secret_file: Path,
+    timeout: float,
+    retries: int,
+) -> None:
+    if not url or not auth_token:
+        raise RuntimeError("website push is not configured")
+    body = path.read_bytes()
+    secret = relay_secret_file.read_bytes().strip()
+    if len(secret) < 32:
+        raise RuntimeError("relay secret is invalid")
+    signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            request = urllib.request.Request(
+                url,
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "X-Football-Signature": signature,
+                    "OAI-Sites-Authorization": f"Bearer {auth_token}",
+                    "User-Agent": HEADERS["User-Agent"],
+                },
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response_body = json.loads(response.read())
+                if response.status != 200 or response_body.get("ok") is not True:
+                    raise RuntimeError(f"website ingest returned HTTP {response.status}")
+            return
+        except (OSError, ValueError, urllib.error.URLError, RuntimeError) as error:
+            last_error = error
+            if attempt < retries:
+                time.sleep(2 ** (attempt - 1))
+    raise RuntimeError(f"website push failed after {retries} attempts: {last_error}")
+
+
 def fetch_payload(url: str, timeout: float, retries: int = 3) -> tuple[dict[str, Any], bytes]:
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -1706,6 +1748,16 @@ def run_once(args: argparse.Namespace) -> int:
             retained_count = export_current(
                 connection, data_dir / "latest.json", collected_at, live_business_dates
             )
+            website_push_error = None
+            try:
+                push_latest_to_site(
+                    data_dir / "latest.json", args.website_push_url,
+                    args.website_push_auth_token, Path(args.relay_secret_file),
+                    args.timeout, args.retries,
+                )
+            except Exception as error:
+                website_push_error = str(error)
+                logging.warning("website push skipped: %s", error)
             save_raw_snapshot(data_dir, raw, args.retention_days)
             health = {
                 "status": "ok", "checkedAt": collected_at, "liveMatchCount": live_count,
@@ -1721,12 +1773,15 @@ def run_once(args: argparse.Namespace) -> int:
                 "fundamentalMatchedCount": fundamental_stats["matched"],
                 "fundamentalEnrichedCount": fundamental_stats["enriched"],
                 "confirmedLineupCount": fundamental_stats["lineups"],
+                "websitePushStatus": "ok" if website_push_error is None else "warning",
                 "source": "中国体育彩票官方接口",
             }
             if result_error:
                 health["resultError"] = result_error
             if fundamental_error:
                 health["fundamentalError"] = fundamental_error
+            if website_push_error:
+                health["websitePushError"] = website_push_error
             atomic_json(data_dir / "health.json", health)
             with connection:
                 connection.execute(
@@ -1759,6 +1814,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retention-days", type=int, default=90)
     parser.add_argument("--api-football-key", default=os.environ.get("API_FOOTBALL_KEY", ""))
+    parser.add_argument("--website-push-url", default=os.environ.get("FOOTBALL_AI_WEBSITE_PUSH_URL", ""))
+    parser.add_argument("--website-push-auth-token", default=os.environ.get("FOOTBALL_AI_SITE_BYPASS_TOKEN", ""))
+    parser.add_argument("--relay-secret-file", default=os.environ.get("FOOTBALL_AI_RELAY_SECRET_FILE", "/etc/football-ai/relay-secret"))
     return parser.parse_args()
 
 
