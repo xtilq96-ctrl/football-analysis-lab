@@ -30,7 +30,9 @@ jobs:
           jq -e '.count == (.matches | length) and .count > 0 and (.updatedAt | type == "string")' body.json >/dev/null
           signature="$(awk 'BEGIN { IGNORECASE=1 } /^x-football-signature:/ { gsub("\\r", "", $2); print $2 }' headers.txt | tail -n 1)"
           test -n "$signature"
-          jq -Rs --arg signature "$signature" '{body: ., signature: $signature}' body.json > latest.json
+          body_base64="$(base64 -w 0 body.json)"
+          jq -n --arg bodyBase64 "$body_base64" --arg signature "$signature" \
+            '{bodyBase64: $bodyBase64, signature: $signature}' > latest.json
 
       - name: Publish one-file live-data branch
         env:

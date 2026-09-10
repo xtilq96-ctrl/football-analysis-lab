@@ -280,14 +280,18 @@ function fromHex(value: string) {
 }
 
 async function verifyRelayBody(body: string, signatureValue: string, relaySecret: string): Promise<RelayPayload> {
+  return verifyRelayBytes(new TextEncoder().encode(body), signatureValue, relaySecret);
+}
+
+async function verifyRelayBytes(bytes: Uint8Array, signatureValue: string, relaySecret: string): Promise<RelayPayload> {
   const signature = fromHex(signatureValue);
   if (!signature) throw new Error('大陆采集节点签名缺失');
   const key = await crypto.subtle.importKey(
     'raw', new TextEncoder().encode(relaySecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'],
   );
-  const valid = await crypto.subtle.verify('HMAC', key, signature, new TextEncoder().encode(body));
+  const valid = await crypto.subtle.verify('HMAC', key, signature, bytes);
   if (!valid) throw new Error('大陆采集节点签名校验失败');
-  const payload = JSON.parse(body) as RelayPayload;
+  const payload = JSON.parse(new TextDecoder().decode(bytes)) as RelayPayload;
   if (!payload.updatedAt || !payload.businessDate || !Array.isArray(payload.matches) || payload.count !== payload.matches.length) {
     throw new Error('大陆采集节点数据结构异常');
   }
@@ -320,8 +324,14 @@ async function verifiedRelayData(): Promise<RelayPayload> {
 
   // GitHub mirrors the signed relay response as an envelope because raw-file
   // responses cannot preserve the original HTTP signature header.
-  const envelope = JSON.parse(body) as { body?: string; signature?: string };
-  if (!envelope.body || !envelope.signature) throw new Error('大陆采集节点签名缺失');
+  const envelope = JSON.parse(body) as { body?: string; bodyBase64?: string; signature?: string };
+  if (!envelope.signature) throw new Error('大陆采集节点签名缺失');
+  if (envelope.bodyBase64) {
+    const binary = atob(envelope.bodyBase64);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    return verifyRelayBytes(bytes, envelope.signature, relaySecret);
+  }
+  if (!envelope.body) throw new Error('大陆采集节点签名缺失');
   return verifyRelayBody(envelope.body, envelope.signature, relaySecret);
 }
 
