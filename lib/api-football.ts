@@ -360,11 +360,13 @@ export async function getDashboardData(): Promise<DashboardData> {
         source.forEach((item) => merged.set(item.matchId, item));
         source = [...merged.values()];
       }
-    } catch {
+    } catch (relayError) {
+      console.warn('mainland relay unavailable', relayError instanceof Error ? relayError.message : 'unknown relay error');
       try {
         const payload = await getSportteryData();
         const group = payload.value?.matchInfoList?.find((item) => item.businessDate === businessDate);
         source = group?.subMatchList ?? [];
+        if (!source.length) throw new Error('体彩官方直连未返回当前业务日');
         sourceMode = 'live';
       } catch {
         if (businessDate !== '2026-09-08') throw new Error('大陆体彩采集节点暂时不可用');
