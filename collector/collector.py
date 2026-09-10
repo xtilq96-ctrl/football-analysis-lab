@@ -608,8 +608,13 @@ def blend_fundamentals(base: dict[str, Any], fundamentals: dict[str, Any]) -> di
     }
 
 
-def build_recommendations(matches: list[dict[str, Any]], business_dates: list[str]) -> dict[str, list[dict[str, Any]]]:
+def build_recommendations(
+    matches: list[dict[str, Any]],
+    business_dates: list[str],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    """Build a restrained daily plan that may contain zero, two, three or four legs."""
     result: dict[str, list[dict[str, Any]]] = {}
+    decisions: dict[str, dict[str, Any]] = {}
     pick_key = {"主胜": "h", "平局": "d", "客胜": "a"}
     for business_date in business_dates:
         candidates: list[dict[str, Any]] = []
@@ -622,7 +627,17 @@ def build_recommendations(matches: list[dict[str, Any]], business_dates: list[st
             prediction = analysis.get("prediction")
             confidence = float(analysis.get("confidence") or 0)
             price = decimal_odds((item.get("had") or {}).get(pick_key.get(prediction)))
-            if prediction not in pick_key or confidence < 42 or price is None:
+            probabilities = analysis.get("probabilities") or {}
+            market_probabilities = analysis.get("marketProbabilities") or probabilities
+            probability_key = {"主胜": "home", "平局": "draw", "客胜": "away"}.get(prediction)
+            market_probability = float(market_probabilities.get(probability_key) or 0) if probability_key else 0
+            edge = confidence - market_probability
+            value_index = confidence / 100 * price if price is not None else 0
+            risk = str(analysis.get("risk") or "待评估")
+            if (
+                prediction not in pick_key or confidence < 45 or price is None
+                or risk == "高风险" or edge < 1 or value_index < 1.01
+            ):
                 continue
             candidates.append({
                 "matchId": item["matchId"],
@@ -633,35 +648,93 @@ def build_recommendations(matches: list[dict[str, Any]], business_dates: list[st
                 "pick": prediction,
                 "probability": confidence,
                 "odds": price,
-                "quality": confidence - float(analysis.get("marketMargin") or 0) * 0.35,
+                "edge": round(edge, 2),
+                "valueIndex": round(value_index, 3),
+                "risk": risk,
+                "isLocked": bool((item.get("analysisSchedule") or {}).get("isLocked")),
+                "quality": confidence + max(-3.0, min(8.0, edge)) - float(analysis.get("marketMargin") or 0) * 0.35,
             })
-        pairs: list[dict[str, Any]] = []
-        for left_index, left in enumerate(candidates):
-            for right in candidates[left_index + 1:]:
-                combined_probability = left["probability"] * right["probability"] / 100
-                diversity_bonus = 2 if left["league"] != right["league"] else 0
-                score = combined_probability + diversity_bonus + (left["quality"] + right["quality"]) * 0.05
-                pairs.append({
-                    "legs": [{key: value for key, value in leg.items() if key not in {"quality"}} for leg in (left, right)],
-                    "combinedProbability": round(combined_probability, 2),
-                    "combinedOdds": round(left["odds"] * right["odds"], 2),
-                    "level": "稳健" if combined_probability >= 30 else "均衡" if combined_probability >= 23 else "观察",
-                    "_score": score,
-                })
-        pairs.sort(key=lambda item: item["_score"], reverse=True)
+        candidates.sort(key=lambda item: (item["quality"], item["probability"]), reverse=True)
+
+        strong = [item for item in candidates if item["probability"] >= 54]
+        solid = [item for item in candidates if item["probability"] >= 50]
+        leg_count = 0
+        threshold = 0.0
+        if len(strong) >= 4:
+            best_four_probability = math.prod(item["probability"] / 100 for item in strong[:4]) * 100
+            if best_four_probability >= 10:
+                leg_count, threshold = 4, 10
+        if leg_count == 0 and len(strong) >= 3:
+            best_three_probability = math.prod(item["probability"] / 100 for item in strong[:3]) * 100
+            if best_three_probability >= 17:
+                leg_count, threshold = 3, 17
+        if leg_count == 0 and len(solid) >= 2:
+            best_two_probability = math.prod(item["probability"] / 100 for item in solid[:2]) * 100
+            if best_two_probability >= 27:
+                leg_count, threshold = 2, 27
+
+        if leg_count == 0:
+            result[business_date] = []
+            decisions[business_date] = {
+                "status": "no_pick", "legCount": 0, "candidateCount": len(candidates),
+                "reason": "可用场次、单场概率或组合概率未同时达到安全门槛，系统今日不强行推荐。",
+                "rulesVersion": "dynamic-combo-v1",
+            }
+            continue
+
+        from itertools import combinations
+
+        pool = strong if leg_count >= 3 else solid
+        combinations_ranked: list[dict[str, Any]] = []
+        for legs_tuple in combinations(pool[:8], leg_count):
+            leagues = {leg["league"] for leg in legs_tuple}
+            if leg_count >= 3 and len(leagues) < 2:
+                continue
+            combined_probability = math.prod(leg["probability"] / 100 for leg in legs_tuple) * 100
+            if combined_probability < threshold:
+                continue
+            combined_odds = math.prod(leg["odds"] for leg in legs_tuple)
+            average_edge = sum(leg["edge"] for leg in legs_tuple) / leg_count
+            diversity = len(leagues) / leg_count
+            score = combined_probability + average_edge * 0.8 + diversity * 3
+            combinations_ranked.append({
+                "type": f"{leg_count}串1", "legCount": leg_count,
+                "legs": [
+                    {key: value for key, value in leg.items() if key not in {"quality", "isLocked"}}
+                    for leg in legs_tuple
+                ],
+                "combinedProbability": round(combined_probability, 2),
+                "combinedOdds": round(combined_odds, 2),
+                "averageEdge": round(average_edge, 2),
+                "level": "相对稳健" if combined_probability >= threshold * 1.35 else "谨慎观察",
+                "isLocked": any(leg["isLocked"] for leg in legs_tuple),
+                "basis": f"{leg_count}场均达到概率与正向价值门槛，覆盖{len(leagues)}个联赛；组合概率不低于{threshold:.0f}%",
+                "_score": score,
+            })
+        combinations_ranked.sort(key=lambda item: item["_score"], reverse=True)
         selected: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
-        for pair in pairs:
-            identity = tuple(sorted(leg["matchId"] for leg in pair["legs"]))
+        seen: set[tuple[str, ...]] = set()
+        for combination in combinations_ranked:
+            identity = tuple(sorted(leg["matchId"] for leg in combination["legs"]))
             if identity in seen:
                 continue
             seen.add(identity)
-            pair.pop("_score", None)
-            selected.append(pair)
+            combination.pop("_score", None)
+            selected.append(combination)
             if len(selected) == 3:
                 break
         result[business_date] = selected
-    return result
+        decisions[business_date] = {
+            "status": "recommended" if selected else "no_pick",
+            "legCount": leg_count if selected else 0,
+            "candidateCount": len(candidates),
+            "reason": (
+                f"系统综合单场概率、风险、概率优势和联赛相关性，自动选择{leg_count}串1。"
+                if selected else "候选场次存在相关性集中或组合概率不足，系统今日不推荐。"
+            ),
+            "rulesVersion": "dynamic-combo-v1",
+        }
+    return result, decisions
 
 
 def official_number(match: dict[str, Any]) -> str:
@@ -786,6 +859,7 @@ CREATE TABLE IF NOT EXISTS prediction_settlements (
   score_hit INTEGER,
   total_goals_hit INTEGER,
   over_under_hit INTEGER,
+  evaluation_payload TEXT,
   settled_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS two_leg_recommendations (
@@ -809,6 +883,10 @@ def connect_database(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=30)
     connection.executescript(SCHEMA)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(prediction_settlements)")}
+    if "evaluation_payload" not in columns:
+        connection.execute("ALTER TABLE prediction_settlements ADD COLUMN evaluation_payload TEXT")
+        connection.commit()
     return connection
 
 
@@ -1276,12 +1354,34 @@ def settle_match_results(
                     (predicted_over_under == "大2.5" and actual_total >= 3)
                     or (predicted_over_under == "小2.5" and actual_total <= 2)
                 )
+            probabilities = analysis.get("probabilities") or {}
+            probability_values = [
+                float(probabilities.get(key) or 0) / 100 for key in ("home", "draw", "away")
+            ]
+            actual_index = {"主胜": 0, "平局": 1, "客胜": 2}[actual_outcome]
+            probability_total = sum(probability_values)
+            brier_score = log_loss = None
+            if 0.99 <= probability_total <= 1.01:
+                brier_score = sum(
+                    (probability - (1.0 if index == actual_index else 0.0)) ** 2
+                    for index, probability in enumerate(probability_values)
+                ) / 3
+                log_loss = -math.log(max(0.000001, probability_values[actual_index]))
+            evaluation_payload = json.dumps({
+                "businessDate": prediction.get("businessDate"),
+                "officialNumber": prediction.get("officialNumber"),
+                "modelVersion": analysis.get("modelVersion"),
+                "probabilities": probabilities or None,
+                "confidence": analysis.get("confidence"),
+                "brierScore": round(brier_score, 4) if brier_score is not None else None,
+                "logLoss": round(log_loss, 4) if log_loss is not None else None,
+            }, ensure_ascii=False, separators=(",", ":"))
             connection.execute(
                 """INSERT INTO prediction_settlements
                    (match_id,predicted_outcome,predicted_score,predicted_total_goals,predicted_over_under,
                     actual_outcome,actual_score,actual_total_goals,outcome_hit,score_hit,total_goals_hit,
-                    over_under_hit,settled_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    over_under_hit,evaluation_payload,settled_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(match_id) DO UPDATE SET
                      actual_outcome=excluded.actual_outcome,
                      actual_score=excluded.actual_score,
@@ -1290,20 +1390,21 @@ def settle_match_results(
                      score_hit=excluded.score_hit,
                      total_goals_hit=excluded.total_goals_hit,
                      over_under_hit=excluded.over_under_hit,
+                     evaluation_payload=COALESCE(prediction_settlements.evaluation_payload,excluded.evaluation_payload),
                      settled_at=excluded.settled_at""",
                 (
                     match_id, predicted_outcome, predicted_score, predicted_total, predicted_over_under,
                     actual_outcome, display_score, actual_total,
                     int(predicted_outcome == actual_outcome) if predicted_outcome else None,
                     int(predicted_score == display_score) if predicted_score else None,
-                    total_hit, over_under_hit, settled_at,
+                    total_hit, over_under_hit, evaluation_payload, settled_at,
                 ),
             )
             settled += 1
     return completed, settled
 
 
-def save_two_leg_recommendations(
+def save_combo_recommendations(
     connection: sqlite3.Connection,
     recommendations: dict[str, list[dict[str, Any]]],
     created_at: str,
@@ -1311,9 +1412,12 @@ def save_two_leg_recommendations(
     with connection:
         for business_date, items in recommendations.items():
             for item in items:
+                if not item.get("isLocked"):
+                    continue
                 identity = "|".join(
                     sorted(f"{leg['matchId']}:{leg['pick']}" for leg in item["legs"])
                 )
+                identity = f"dynamic-v1:{len(item['legs'])}:{identity}"
                 connection.execute(
                     """INSERT OR IGNORE INTO two_leg_recommendations
                        (business_date,recommendation_key,payload,created_at) VALUES (?,?,?,?)""",
@@ -1324,7 +1428,7 @@ def save_two_leg_recommendations(
                 )
 
 
-def settle_two_leg_recommendations(connection: sqlite3.Connection, settled_at: str) -> int:
+def settle_combo_recommendations(connection: sqlite3.Connection, settled_at: str) -> int:
     pending = connection.execute(
         """SELECT r.id,r.payload FROM two_leg_recommendations r
            LEFT JOIN two_leg_settlements s ON s.recommendation_id=r.id
@@ -1345,7 +1449,7 @@ def settle_two_leg_recommendations(connection: sqlite3.Connection, settled_at: s
                     complete = False
                     break
                 leg_hits.append(row[0] == leg.get("pick"))
-            if complete and len(leg_hits) == 2:
+            if complete and 2 <= len(leg_hits) <= 4:
                 connection.execute(
                     "INSERT INTO two_leg_settlements(recommendation_id,hit,settled_at) VALUES (?,?,?)",
                     (recommendation_id, int(all(leg_hits)), settled_at),
@@ -1360,12 +1464,66 @@ def performance_summary(connection: sqlite3.Connection) -> dict[str, Any]:
                   COALESCE(SUM(total_goals_hit),0),COALESCE(SUM(over_under_hit),0)
            FROM prediction_settlements"""
     ).fetchone()
-    combo = connection.execute(
-        "SELECT COUNT(*),COALESCE(SUM(hit),0) FROM two_leg_settlements"
-    ).fetchone()
+    combo_rows = connection.execute(
+        """SELECT r.payload,s.hit FROM two_leg_recommendations r
+           JOIN two_leg_settlements s ON s.recommendation_id=r.id"""
+    ).fetchall()
     total = int(row[0])
-    combo_total = int(combo[0])
+    combo_stats: dict[int, dict[str, int]] = {2: {"settled": 0, "hits": 0}, 3: {"settled": 0, "hits": 0}, 4: {"settled": 0, "hits": 0}}
+    for payload, hit in combo_rows:
+        with contextlib.suppress(ValueError, TypeError):
+            leg_count = len((json.loads(payload) or {}).get("legs") or [])
+            if leg_count in combo_stats:
+                combo_stats[leg_count]["settled"] += 1
+                combo_stats[leg_count]["hits"] += int(hit)
+    combo_total = sum(item["settled"] for item in combo_stats.values())
+    combo_hits = sum(item["hits"] for item in combo_stats.values())
     rate = lambda hits, sample: round(hits / sample * 100, 1) if sample else None
+    evaluation_rows = connection.execute(
+        """SELECT outcome_hit,evaluation_payload FROM prediction_settlements
+           WHERE evaluation_payload IS NOT NULL ORDER BY settled_at DESC"""
+    ).fetchall()
+
+    def probability_metrics(rows: list[tuple[Any, Any]]) -> dict[str, Any]:
+        parsed: list[tuple[int, dict[str, Any]]] = []
+        for hit, payload in rows:
+            with contextlib.suppress(ValueError, TypeError):
+                item = json.loads(payload)
+                if item.get("brierScore") is not None and item.get("confidence") is not None:
+                    parsed.append((int(hit), item))
+        if not parsed:
+            return {"sampleSize": 0, "outcomeHitRate": None, "brierScore": None, "logLoss": None}
+        return {
+            "sampleSize": len(parsed),
+            "outcomeHitRate": rate(sum(hit for hit, _item in parsed), len(parsed)),
+            "brierScore": round(sum(float(item["brierScore"]) for _hit, item in parsed) / len(parsed), 4),
+            "logLoss": round(sum(float(item["logLoss"]) for _hit, item in parsed) / len(parsed), 4),
+        }
+
+    buckets = [(0, 50, "低于50%"), (50, 60, "50%～59%"), (60, 70, "60%～69%"), (70, 101, "70%以上")]
+    calibration: list[dict[str, Any]] = []
+    for lower, upper, label in buckets:
+        selected: list[tuple[int, float]] = []
+        for hit, payload in evaluation_rows:
+            with contextlib.suppress(ValueError, TypeError):
+                confidence = float(json.loads(payload).get("confidence"))
+                if lower <= confidence < upper:
+                    selected.append((int(hit), confidence))
+        if selected:
+            average_confidence = sum(value for _hit, value in selected) / len(selected)
+            actual_hit_rate = sum(hit for hit, _value in selected) / len(selected) * 100
+            calibration.append({
+                "label": label, "sampleSize": len(selected),
+                "averageConfidence": round(average_confidence, 1),
+                "actualHitRate": round(actual_hit_rate, 1),
+                "gap": round(actual_hit_rate - average_confidence, 1),
+            })
+    calibration_error = (
+        round(sum(abs(item["gap"]) * item["sampleSize"] for item in calibration) / sum(item["sampleSize"] for item in calibration), 1)
+        if calibration else None
+    )
+    all_probability = probability_metrics(evaluation_rows)
+    recent_probability = probability_metrics(evaluation_rows[:30])
     return {
         "settledMatches": total,
         "outcomeHits": int(row[1]),
@@ -1376,9 +1534,20 @@ def performance_summary(connection: sqlite3.Connection) -> dict[str, Any]:
         "totalGoalsHitRate": rate(int(row[3]), total),
         "overUnderHits": int(row[4]),
         "overUnderHitRate": rate(int(row[4]), total),
-        "settledTwoLegs": combo_total,
-        "twoLegHits": int(combo[1]),
-        "twoLegHitRate": rate(int(combo[1]), combo_total),
+        "settledTwoLegs": combo_stats[2]["settled"],
+        "twoLegHits": combo_stats[2]["hits"],
+        "twoLegHitRate": rate(combo_stats[2]["hits"], combo_stats[2]["settled"]),
+        "settledCombinations": combo_total,
+        "combinationHits": combo_hits,
+        "combinationHitRate": rate(combo_hits, combo_total),
+        "combinationStats": [
+            {"legCount": leg_count, **values, "hitRate": rate(values["hits"], values["settled"])}
+            for leg_count, values in combo_stats.items()
+        ],
+        "probabilityEvaluation": all_probability,
+        "recent30": recent_probability,
+        "calibration": calibration,
+        "calibrationError": calibration_error,
     }
 
 
@@ -1421,9 +1590,9 @@ def export_current(
                 "totalGoalsHit": bool(settlement[2]) if settlement[2] is not None else None,
                 "overUnderHit": bool(settlement[3]) if settlement[3] is not None else None,
             }
-    recommendations = build_recommendations(matches, business_dates)
-    save_two_leg_recommendations(connection, recommendations, collected_at)
-    settle_two_leg_recommendations(connection, collected_at)
+    recommendations, recommendation_decisions = build_recommendations(matches, business_dates)
+    save_combo_recommendations(connection, recommendations, collected_at)
+    settle_combo_recommendations(connection, collected_at)
     performance = performance_summary(connection)
     atomic_json(
         output,
@@ -1435,6 +1604,7 @@ def export_current(
             "count": len(matches),
             "matches": matches,
             "recommendations": recommendations,
+            "recommendationDecisions": recommendation_decisions,
             "performance": performance,
         },
     )

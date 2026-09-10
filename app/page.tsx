@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
-import { getDashboardData, type DashboardMatch, type DashboardRecommendation } from '@/lib/api-football';
+import { getDashboardData, type DashboardMatch, type DashboardRecommendation, type RecommendationDecision } from '@/lib/api-football';
 
 const riskStyles = {
   green: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300',
@@ -74,7 +74,7 @@ export default async function Home() {
             <p>{data.error ? <><span className="font-medium">官方数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : data.sourceMode === 'verified_snapshot' ? <><span className="font-medium text-sky-200">已显示官方核验快照。</span> 自动采集数据暂时不可用，页面会继续重试。</> : data.sourceMode === 'mainland_relay' ? <><span className="font-medium text-sky-200">南京采集节点运行正常。</span> 每5分钟读取中国体育彩票官方数据并校验签名，已开赛场次与赔率变化持续留存。</> : <><span className="font-medium text-sky-200">官方数据已连接。</span> 场次、时间和固定奖来自中国体育彩票公开接口；概率由官方固定奖去水换算。</>}</p>
           </div>
 
-          <RecommendationPanel recommendations={data.recommendations} />
+          <RecommendationPanel recommendations={data.recommendations} decision={data.recommendationDecision} />
 
           {data.matches.length ? (
             <div className="space-y-4">{data.matches.map((match) => <MatchCard key={match.id} match={match} />)}</div>
@@ -109,7 +109,7 @@ export default async function Home() {
               <Metric label="胜平负命中" value={data.performance.outcomeHitRate === null ? '—' : String(data.performance.outcomeHitRate)} unit={data.performance.outcomeHitRate === null ? '' : '%'} />
               <Metric label="大小2.5命中" value={data.performance.overUnderHitRate === null ? '—' : String(data.performance.overUnderHitRate)} unit={data.performance.overUnderHitRate === null ? '' : '%'} />
               <Metric label="精确比分命中" value={data.performance.exactScoreHitRate === null ? '—' : String(data.performance.exactScoreHitRate)} unit={data.performance.exactScoreHitRate === null ? '' : '%'} />
-              <Metric label="2串1命中" value={data.performance.twoLegHitRate === null ? '—' : String(data.performance.twoLegHitRate)} unit={data.performance.twoLegHitRate === null ? '' : '%'} />
+              <Metric label="组合命中" value={data.performance.combinationHitRate == null ? '—' : String(data.performance.combinationHitRate)} unit={data.performance.combinationHitRate == null ? '' : '%'} />
             </CardContent>
           </Card>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-1 xl:grid-cols-2"><Metric label="今日竞彩" value={String(data.matches.length)} unit="场" /><Metric label="固定奖覆盖" value={String(completeness)} unit="%" /></div>
@@ -161,24 +161,24 @@ function MatchCard({ match }: { match: DashboardMatch }) {
   );
 }
 
-function RecommendationPanel({ recommendations }: { recommendations: DashboardRecommendation[] }) {
+function RecommendationPanel({ recommendations, decision }: { recommendations: DashboardRecommendation[]; decision: RecommendationDecision | null }) {
   return (
     <Card className="mb-5 border-lime-300/15 bg-[linear-gradient(135deg,rgba(190,242,100,.08),rgba(255,255,255,.025))] shadow-none">
       <CardHeader className="pb-3">
         <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base font-medium">
-          <span className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-lime-300" />自动 2 串 1</span>
+          <span className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-lime-300" />自动组合决策 · {recommendations[0]?.type ?? '今日不推荐'}</span>
           <span className="text-xs font-normal text-white/35">V2 市场概率 + 球队基本面 + 泊松比分</span>
         </CardTitle>
       </CardHeader>
       <CardContent>
         {recommendations.length ? <div className="grid gap-3 xl:grid-cols-3">{recommendations.map((recommendation, index) => (
           <div key={recommendation.legs.map((leg) => leg.matchId).join('-')} className="rounded-xl border border-white/8 bg-black/10 p-3">
-            <div className="mb-2 flex items-center justify-between"><Badge className={index === 0 ? 'border-lime-300/20 bg-lime-300/10 text-lime-200' : 'border-white/10 bg-white/5 text-white/55'}>{index === 0 ? '首选' : `备选 ${index}`}</Badge><span className="text-xs text-white/38">{recommendation.level}</span></div>
+            <div className="mb-2 flex items-center justify-between"><Badge className={index === 0 ? 'border-lime-300/20 bg-lime-300/10 text-lime-200' : 'border-white/10 bg-white/5 text-white/55'}>{index === 0 ? `首选 ${recommendation.type ?? ''}` : `备选 ${index}`}</Badge><span className="text-xs text-white/38">{recommendation.level}{recommendation.isLocked ? ' · 已锁定' : ''}</span></div>
             <div className="space-y-2">{recommendation.legs.map((leg) => <div key={leg.matchId} className="text-sm"><p className="text-white/75">{leg.officialNumber} · {leg.pick} <span className="text-xs text-white/35">@ {leg.odds}</span></p><p className="truncate text-xs text-white/35">{leg.home} vs {leg.away} · {leg.probability}%</p></div>)}</div>
             <div className="mt-3 flex justify-between border-t border-white/7 pt-2 text-xs text-white/40"><span>组合概率 {recommendation.combinedProbability}%</span><span>参考倍数 {recommendation.combinedOdds}</span></div>
           </div>
-        ))}</div> : <p className="text-sm text-white/45">当前没有同时达到最低概率要求的两场组合，系统选择不推荐。</p>}
-        <p className="mt-3 text-xs leading-5 text-white/35">只在模型概率达到门槛时生成组合；概率与参考倍数用于研究和回测，不代表收益保证。</p>
+        ))}</div> : <p className="text-sm text-white/45">{decision?.reason ?? '组合决策等待下一次数据同步。'}</p>}
+        <p className="mt-3 text-xs leading-5 text-white/35">系统会在不推荐、2串1、3串1和4串1之间自动选择；概率与参考倍数只用于研究和回测，不代表收益保证。</p>
       </CardContent>
     </Card>
   );

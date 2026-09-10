@@ -4,26 +4,32 @@ import { getDashboardData } from '@/lib/api-football';
 export default async function EvaluationPage() {
   const data = await getDashboardData();
   const performance = data.performance;
-  return <DashboardSectionShell active="/evaluation" title="模型评估" description="公开展示系统怎样从体彩固定奖得到胜平负概率，再计算比分和总进球；历史命中率只统计已经完赛并自动核对的样本。">
-    <div className="grid gap-4 xl:grid-cols-2">
-      <SectionCard title="1. 胜平负概率">
-        <p className="text-sm leading-7 text-white/55">先把体彩胜、平、负固定奖分别转换成隐含概率：<b className="text-white/80">1 ÷ 固定奖</b>。三项相加通常超过100%，系统再除以三项总和完成“去水”，得到市场基准概率。</p>
-        <p className="mt-3 text-sm leading-7 text-white/55">有历史样本时，再结合近10场积分、进失球、零封率、主客场表现、休息天数和14天赛程密度进行有限修正。修正幅度设有上限，避免少量历史数据压过体彩市场信息。</p>
+  const probability = performance.probabilityEvaluation;
+  const recent = performance.recent30;
+  return <DashboardSectionShell active="/evaluation" title="模型评估" description="每场预测在截止时间锁定，完赛后自动核对胜平负、比分、总进球和概率质量；样本不足时不会据此升级模型。">
+    <section className="rounded-2xl border border-lime-300/15 bg-lime-300/[.055] p-5 sm:p-6">
+      <div className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="text-base font-medium">真实赛果验证</h2><p className="mt-1 text-sm text-white/45">累计结果与最近30场同时展示，防止历史平均掩盖近期退化。</p></div><span className="text-xs text-white/35">概率误差越低越好</span></div>
+      <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4"><Metric label="已核对比赛" value={`${performance.settledMatches}场`} /><Metric label="胜平负命中" value={rate(performance.outcomeHitRate)} /><Metric label="大小2.5命中" value={rate(performance.overUnderHitRate)} /><Metric label="总进球命中" value={rate(performance.totalGoalsHitRate)} /><Metric label="概率样本" value={`${probability?.sampleSize ?? 0}场`} /><Metric label="Brier误差" value={score(probability?.brierScore)} /><Metric label="最近30场命中" value={rate(recent?.outcomeHitRate ?? null)} /><Metric label="校准偏差" value={performance.calibrationError == null ? '样本不足' : `${performance.calibrationError}点`} /></div>
+    </section>
+
+    <div className="mt-4 grid gap-4 xl:grid-cols-[1.2fr_.8fr]">
+      <SectionCard title="概率校准">
+        {performance.calibration?.length ? <div className="overflow-x-auto"><table className="w-full min-w-[520px] text-left text-sm"><thead className="text-white/35"><tr className="border-b border-white/8"><th className="pb-3 font-normal">模型置信度</th><th className="pb-3 font-normal">样本</th><th className="pb-3 font-normal">平均预测</th><th className="pb-3 font-normal">实际命中</th><th className="pb-3 font-normal">偏差</th></tr></thead><tbody>{performance.calibration.map((item) => <tr key={item.label} className="border-b border-white/6 last:border-0"><td className="py-3 text-white/70">{item.label}</td><td className="py-3 text-white/45">{item.sampleSize}场</td><td className="py-3 text-white/60">{item.averageConfidence}%</td><td className="py-3 text-white/60">{item.actualHitRate}%</td><td className={`py-3 ${Math.abs(item.gap) <= 8 ? 'text-emerald-300' : 'text-amber-300'}`}>{signed(item.gap)}点</td></tr>)}</tbody></table></div> : <p className="text-sm text-white/45">新评估字段已启用，等待后续完赛样本形成校准分组。</p>}
       </SectionCard>
-      <SectionCard title="2. 比分概率">
-        <p className="text-sm leading-7 text-white/55">系统寻找一组主队与客队期望进球，使泊松模型计算出的主胜、平局、客胜概率尽量接近修正后的胜平负概率。然后计算0～10球的联合概率，例如“主队进1球概率 × 客队进0球概率”得到1-0概率。</p>
-        <p className="mt-3 text-sm leading-7 text-white/55">页面的模型比分是与预测赛果方向一致的最高概率比分，同时保存概率最高的前5个比分。它不是确定结果。</p>
-      </SectionCard>
-      <SectionCard title="3. 总进球数">
-        <p className="text-sm leading-7 text-white/55">主队期望进球与客队期望进球相加，得到全场总期望进球。再用泊松分布计算0、1、2、3……球各自概率，概率最高的一档作为总进球参考；3球及以上的概率合计为“大2.5”。</p>
-      </SectionCard>
-      <SectionCard title="4. 数据边界">
-        <p className="text-sm leading-7 text-white/55">免费基本面来自近120天中国体彩已收录比赛，不代表球队全部正式比赛。伤停和首发没有可靠专业源时不会参与修正，并在页面明确显示“等待专业源”。</p>
+      <SectionCard title="组合回测">
+        <div className="space-y-3">{(performance.combinationStats ?? []).map((item) => <div key={item.legCount} className="flex items-center justify-between rounded-xl border border-white/8 bg-black/10 p-4"><div><p className="text-sm text-white/70">{item.legCount}串1</p><p className="mt-1 text-xs text-white/35">已核对 {item.settled} 组 · 命中 {item.hits} 组</p></div><b className="text-lg text-white/80">{rate(item.hitRate)}</b></div>)}</div>
+        <p className="mt-3 text-xs leading-5 text-white/35">不同串数分开统计。组合只有在最早场锁定后才进入正式回测，避免把临时方案混入成绩。</p>
       </SectionCard>
     </div>
-    <section className="mt-4 rounded-2xl border border-lime-300/15 bg-lime-300/[.055] p-5 sm:p-6"><h2 className="text-base font-medium">当前历史验证</h2><div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4"><Metric label="已核对比赛" value={`${performance.settledMatches}场`} /><Metric label="胜平负命中" value={rate(performance.outcomeHitRate)} /><Metric label="总进球命中" value={rate(performance.totalGoalsHitRate)} /><Metric label="2串1命中" value={rate(performance.twoLegHitRate)} /></div><p className="mt-4 text-xs leading-5 text-white/40">样本越少，命中率波动越大。系统不会用命中率承诺未来结果。</p></section>
+
+    <div className="mt-4 grid gap-4 xl:grid-cols-2">
+      <SectionCard title="算法口径"><p className="text-sm leading-7 text-white/55">胜平负先由体彩固定奖去水，再用近期状态、主客场攻防和赛程做有限修正。比分与总进球来自和胜平负概率相匹配的泊松分布。</p><p className="mt-3 text-sm leading-7 text-white/55">Brier误差和对数损失用于衡量概率本身是否可靠，不只判断最高概率选项有没有猜中。</p></SectionCard>
+      <SectionCard title="升级纪律"><p className="text-sm leading-7 text-white/55">当前数据只用于持续观察。达到足够样本后，候选模型必须同时通过命中率、概率校准和近期稳定性测试，才允许升级；否则继续保留现有模型。</p><p className="mt-3 text-xs text-white/35">历史表现不代表未来结果，系统不作收益承诺。</p></SectionCard>
+    </div>
   </DashboardSectionShell>;
 }
 
-function rate(value: number | null) { return value === null ? '样本不足' : `${value}%`; }
+function rate(value: number | null | undefined) { return value == null ? '样本不足' : `${value}%`; }
+function score(value: number | null | undefined) { return value == null ? '样本不足' : value.toFixed(4); }
+function signed(value: number) { return `${value > 0 ? '+' : ''}${value}`; }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-white/8 bg-black/10 p-4"><p className="text-xs text-white/38">{label}</p><p className="mt-1 text-xl font-semibold text-white/80">{value}</p></div>; }

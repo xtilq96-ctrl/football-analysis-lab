@@ -11,7 +11,7 @@ export default async function SystemPage() {
       <SectionCard title="中国体彩官方数据"><Rows rows={[["当日业务日", data.businessDate],["今日场次", `${data.matches.length}场`],["最近同步", updatedAt],["运行方式", "南京节点每5分钟"]]} /></SectionCard>
       <SectionCard title="球队历史基本面"><Rows rows={[["已生成", `${historyReady}/${data.matches.length}场`],["历史范围", "近120天体彩官方赛果"],["完整回填", "每天1次"],["增量更新", "每5分钟"]]} /></SectionCard>
       <SectionCard title="伤停与首发"><Rows rows={[["双方首发确认", `${lineups}场`],["当前状态", lineups ? "部分已取得" : "等待专业数据源"],["缺失处理", "不猜测、不修正"],["临场检查", "开赛前3小时"]]} /></SectionCard>
-      <SectionCard title="自动复盘"><Rows rows={[["已核对赛果", `${data.performance.settledMatches}场`],["已核对2串1", `${data.performance.settledTwoLegs}组`],["预测锁定", "开赛前60分钟或21:00"],["运行状态", data.error ? "数据重试中" : "正常"]]} /></SectionCard>
+      <SectionCard title="自动复盘"><Rows rows={[["已核对赛果", `${data.performance.settledMatches}场`],["已核对组合", `${data.performance.settledCombinations ?? data.performance.settledTwoLegs}组`],["动态串数", "不推荐 / 2 / 3 / 4串1"],["预测锁定", "开赛前60分钟或21:00"],["运行状态", data.error ? "数据重试中" : "正常"]]} /></SectionCard>
     </div>
   </DashboardSectionShell>;
 }

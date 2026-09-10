@@ -68,7 +68,16 @@ export type PerformanceSummary = {
   settledTwoLegs: number;
   twoLegHits: number;
   twoLegHitRate: number | null;
+  settledCombinations?: number;
+  combinationHits?: number;
+  combinationHitRate?: number | null;
+  combinationStats?: Array<{ legCount: number; settled: number; hits: number; hitRate: number | null }>;
+  probabilityEvaluation?: ProbabilityMetrics;
+  recent30?: ProbabilityMetrics;
+  calibration?: Array<{ label: string; sampleSize: number; averageConfidence: number; actualHitRate: number; gap: number }>;
+  calibrationError?: number | null;
 };
+type ProbabilityMetrics = { sampleSize: number; outcomeHitRate: number | null; brierScore: number | null; logLoss: number | null };
 type SportteryMatch = {
   matchId: number;
   matchNum: number;
@@ -110,9 +119,14 @@ type RelayMatch = {
   analysisSchedule?: AnalysisSchedule;
 };
 export type DashboardRecommendation = {
+  type?: string;
+  legCount?: number;
   level: string;
   combinedProbability: number;
   combinedOdds: number;
+  averageEdge?: number;
+  isLocked?: boolean;
+  basis?: string;
   legs: Array<{
     matchId: string;
     officialNumber: string;
@@ -124,6 +138,13 @@ export type DashboardRecommendation = {
     odds: number;
   }>;
 };
+export type RecommendationDecision = {
+  status: 'recommended' | 'no_pick';
+  legCount: number;
+  candidateCount: number;
+  reason: string;
+  rulesVersion: string;
+};
 type RelayPayload = {
   source: string;
   businessDate: string;
@@ -132,6 +153,7 @@ type RelayPayload = {
   count: number;
   matches: RelayMatch[];
   recommendations?: Record<string, DashboardRecommendation[]>;
+  recommendationDecisions?: Record<string, RecommendationDecision>;
   performance?: PerformanceSummary;
 };
 
@@ -192,7 +214,7 @@ export type DashboardMatch = {
   settlement: MatchSettlement | null;
 };
 
-export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; performance: PerformanceSummary; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
+export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; recommendationDecision: RecommendationDecision | null; performance: PerformanceSummary; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
 
 function shanghaiDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -321,6 +343,7 @@ export async function getDashboardData(): Promise<DashboardData> {
   let updatedAt = new Date().toISOString();
   let sourceMode: DashboardData['sourceMode'] = 'mainland_relay';
   let recommendations: DashboardRecommendation[] = [];
+  let recommendationDecision: RecommendationDecision | null = null;
   let performance = EMPTY_PERFORMANCE;
   try {
     let source: SportteryMatch[] = [];
@@ -330,6 +353,7 @@ export async function getDashboardData(): Promise<DashboardData> {
       updatedAt = relay.updatedAt;
       source = relay.matches.filter((item) => item.businessDate === businessDate).map(relayMatch);
       recommendations = relay.recommendations?.[businessDate] ?? [];
+      recommendationDecision = relay.recommendationDecisions?.[businessDate] ?? null;
       performance = relay.performance ?? EMPTY_PERFORMANCE;
       if (businessDate === '2026-09-08') {
         const merged = new Map(VERIFIED_SNAPSHOT_2026_09_08.map((item) => [item.matchId, item]));
@@ -393,8 +417,8 @@ export async function getDashboardData(): Promise<DashboardData> {
         settlement: item.settlement ?? null,
       };
     });
-    return { matches, recommendations, performance, updatedAt, businessDate, sourceMode };
+    return { matches, recommendations, recommendationDecision, performance, updatedAt, businessDate, sourceMode };
   } catch (error) {
-    return { matches: [], recommendations: [], performance, updatedAt, businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
+    return { matches: [], recommendations: [], recommendationDecision, performance, updatedAt, businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
   }
 }
