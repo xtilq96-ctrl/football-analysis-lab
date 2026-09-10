@@ -73,11 +73,27 @@ export type PerformanceSummary = {
   combinationHitRate?: number | null;
   combinationStats?: Array<{ legCount: number; settled: number; hits: number; hitRate: number | null }>;
   probabilityEvaluation?: ProbabilityMetrics;
+  recent7Days?: PeriodMetrics;
   recent30?: ProbabilityMetrics;
   calibration?: Array<{ label: string; sampleSize: number; averageConfidence: number; actualHitRate: number; gap: number }>;
   calibrationError?: number | null;
+  modelGovernance?: ModelGovernance;
 };
 type ProbabilityMetrics = { sampleSize: number; outcomeHitRate: number | null; brierScore: number | null; logLoss: number | null };
+type PeriodMetrics = { sampleSize: number; outcomeHitRate: number | null; exactScoreHitRate: number | null; totalGoalsHitRate: number | null; overUnderHitRate: number | null };
+export type ModelGovernance = {
+  activeModel: string;
+  candidateModel: string;
+  decision: 'collecting' | 'hold' | 'promote' | 'rollback';
+  message: string;
+  minimumSampleSize: number;
+  pairedSampleSize: number;
+  baseline: ProbabilityMetrics & { calibrationError?: number | null };
+  candidate: ProbabilityMetrics & { calibrationError?: number | null };
+  baselineRecent30: ProbabilityMetrics;
+  candidateRecent30: ProbabilityMetrics;
+  gates: { enoughSamples: boolean; brierImproved: boolean; hitRateStable: boolean; recentStable: boolean };
+};
 type SportteryMatch = {
   matchId: number;
   matchNum: number;

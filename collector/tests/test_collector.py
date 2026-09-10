@@ -102,7 +102,7 @@ class CollectorTests(unittest.TestCase):
         first = collector.normalized(sources[0], "2026-09-08T08:00:00+00:00")
         second = json.loads(json.dumps(first, ensure_ascii=False))
         second.update({"matchId": "2041346", "officialNumber": "周二002", "matchNumber": 2002, "league": "欧洲冠军联赛"})
-        recommendations = collector.build_recommendations([first, second], ["2026-09-08"])
+        recommendations, _decisions = collector.build_recommendations([first, second], ["2026-09-08"])
         self.assertLessEqual(len(recommendations["2026-09-08"]), 1)
         if recommendations["2026-09-08"]:
             legs = recommendations["2026-09-08"][0]["legs"]
@@ -133,6 +133,31 @@ class CollectorTests(unittest.TestCase):
             performance = collector.performance_summary(connection)
             self.assertEqual(performance["settledMatches"], 1)
             self.assertEqual(performance["outcomeHitRate"], 100.0)
+            connection.close()
+
+    def test_settlement_uses_the_immutable_locked_prediction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = collector.connect_database(Path(directory) / "test.sqlite3")
+            collector.save_matches(
+                connection, collector.flatten_matches(SAMPLE), "2026-09-08T08:00:00+00:00"
+            )
+            current = json.loads(connection.execute(
+                "SELECT payload FROM current_matches WHERE match_id='2041345'"
+            ).fetchone()[0])
+            locked_analysis = dict(current["analysis"])
+            locked_analysis.update({"prediction": "主胜", "modelVersion": "locked-test"})
+            connection.execute(
+                "INSERT INTO locked_predictions(match_id,payload,locked_at) VALUES (?,?,?)",
+                ("2041345", json.dumps({"analysis": locked_analysis}), "2026-09-08T08:30:00+00:00"),
+            )
+            collector.settle_match_results(connection, [{
+                "matchId": 2041345, "matchResultStatus": "2",
+                "sectionsNo1": "1:0", "sectionsNo999": "2:0",
+            }], "2026-09-08T10:00:00+00:00")
+            row = connection.execute(
+                "SELECT predicted_outcome,outcome_hit FROM prediction_settlements"
+            ).fetchone()
+            self.assertEqual(row, ("主胜", 1))
             connection.close()
 
     def test_early_match_uses_its_own_deadline(self):
@@ -199,6 +224,24 @@ class CollectorTests(unittest.TestCase):
         adjusted = collector.blend_fundamentals(base, fundamentals)
         self.assertEqual(adjusted["modelVersion"], "v2-market-fundamentals")
         self.assertGreater(adjusted["probabilities"]["home"], base["probabilities"]["home"])
+
+    def test_candidate_model_stays_between_market_and_fundamental_model(self):
+        base = collector.market_analysis(collector.flatten_matches(SAMPLE)[0])
+        primary = json.loads(json.dumps(base, ensure_ascii=False))
+        primary["probabilities"] = {"home": 18.0, "draw": 22.0, "away": 60.0}
+        candidate = collector.calibrated_candidate(base, primary)
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["modelVersion"], collector.SHADOW_MODEL_VERSION)
+        self.assertGreater(candidate["probabilities"]["away"], base["probabilities"]["away"])
+        self.assertLess(candidate["probabilities"]["away"], primary["probabilities"]["away"])
+
+    def test_model_upgrade_waits_for_enough_paired_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = collector.connect_database(Path(directory) / "test.sqlite3")
+            summary = collector.model_governance_summary(connection)
+            self.assertEqual(summary["decision"], "collecting")
+            self.assertFalse(summary["gates"]["enoughSamples"])
+            connection.close()
 
     def test_builds_form_from_official_sporttery_history(self):
         with tempfile.TemporaryDirectory() as directory:

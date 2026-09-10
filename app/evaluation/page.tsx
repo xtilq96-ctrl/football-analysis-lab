@@ -5,12 +5,32 @@ export default async function EvaluationPage() {
   const data = await getDashboardData();
   const performance = data.performance;
   const probability = performance.probabilityEvaluation;
+  const recent7 = performance.recent7Days;
   const recent = performance.recent30;
+  const governance = performance.modelGovernance;
   return <DashboardSectionShell active="/evaluation" title="模型评估" description="每场预测在截止时间锁定，完赛后自动核对胜平负、比分、总进球和概率质量；样本不足时不会据此升级模型。">
     <section className="rounded-2xl border border-lime-300/15 bg-lime-300/[.055] p-5 sm:p-6">
       <div className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="text-base font-medium">真实赛果验证</h2><p className="mt-1 text-sm text-white/45">累计结果与最近30场同时展示，防止历史平均掩盖近期退化。</p></div><span className="text-xs text-white/35">概率误差越低越好</span></div>
       <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4"><Metric label="已核对比赛" value={`${performance.settledMatches}场`} /><Metric label="胜平负命中" value={rate(performance.outcomeHitRate)} /><Metric label="大小2.5命中" value={rate(performance.overUnderHitRate)} /><Metric label="总进球命中" value={rate(performance.totalGoalsHitRate)} /><Metric label="概率样本" value={`${probability?.sampleSize ?? 0}场`} /><Metric label="Brier误差" value={score(probability?.brierScore)} /><Metric label="最近30场命中" value={rate(recent?.outcomeHitRate ?? null)} /><Metric label="校准偏差" value={performance.calibrationError == null ? '样本不足' : `${performance.calibrationError}点`} /></div>
     </section>
+
+    <div className="mt-4 grid gap-4 xl:grid-cols-[.85fr_1.15fr]">
+      <SectionCard title="分周期准确率">
+        <div className="grid grid-cols-2 gap-3">
+          <Period label="最近7天" sample={recent7?.sampleSize ?? 0} outcome={recent7?.outcomeHitRate} goals={recent7?.totalGoalsHitRate} />
+          <Period label="最近30场" sample={recent?.sampleSize ?? 0} outcome={recent?.outcomeHitRate} goals={null} />
+          <Period label="全部样本" sample={performance.settledMatches} outcome={performance.outcomeHitRate} goals={performance.totalGoalsHitRate} />
+        </div>
+      </SectionCard>
+      <SectionCard title="模型自动升级">
+        {governance ? <>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm text-white/45">现行模型</p><p className="mt-1 font-medium text-white/80">{modelName(governance.activeModel)}</p></div><span className={`rounded-full border px-3 py-1 text-xs ${governance.decision === 'promote' ? 'border-emerald-300/20 bg-emerald-300/10 text-emerald-200' : governance.decision === 'rollback' ? 'border-rose-300/20 bg-rose-300/10 text-rose-200' : 'border-amber-300/20 bg-amber-300/10 text-amber-200'}`}>{decisionLabel(governance.decision)}</span></div>
+          <p className="mt-3 text-sm leading-6 text-white/55">{governance.message}</p>
+          <div className="mt-4 grid grid-cols-2 gap-3"><Metric label="影子测试样本" value={`${governance.pairedSampleSize}/${governance.minimumSampleSize}场`} /><Metric label="候选Brier误差" value={score(governance.candidate.brierScore)} /><Metric label="现行命中率" value={rate(governance.baseline.outcomeHitRate)} /><Metric label="候选命中率" value={rate(governance.candidate.outcomeHitRate)} /></div>
+          <div className="mt-4 grid grid-cols-2 gap-2 text-xs text-white/45 sm:grid-cols-4"><Gate label="样本充足" pass={governance.gates.enoughSamples} /><Gate label="概率误差更低" pass={governance.gates.brierImproved} /><Gate label="命中率稳定" pass={governance.gates.hitRateStable} /><Gate label="近期表现稳定" pass={governance.gates.recentStable} /></div>
+        </> : <p className="text-sm text-white/45">候选模型将在下一轮采集后开始影子测试。</p>}
+      </SectionCard>
+    </div>
 
     <div className="mt-4 grid gap-4 xl:grid-cols-[1.2fr_.8fr]">
       <SectionCard title="概率校准">
@@ -33,3 +53,7 @@ function rate(value: number | null | undefined) { return value == null ? '样本
 function score(value: number | null | undefined) { return value == null ? '样本不足' : value.toFixed(4); }
 function signed(value: number) { return `${value > 0 ? '+' : ''}${value}`; }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-white/8 bg-black/10 p-4"><p className="text-xs text-white/38">{label}</p><p className="mt-1 text-xl font-semibold text-white/80">{value}</p></div>; }
+function Period({ label, sample, outcome, goals }: { label: string; sample: number; outcome: number | null | undefined; goals: number | null | undefined }) { return <div className="rounded-xl border border-white/8 bg-black/10 p-4"><p className="font-medium text-white/75">{label}</p><p className="mt-2 text-sm text-white/50">胜平负 {rate(outcome)}</p>{goals != null && <p className="mt-1 text-sm text-white/50">总进球 {rate(goals)}</p>}<p className="mt-2 text-xs text-white/30">样本 {sample} 场</p></div>; }
+function Gate({ label, pass }: { label: string; pass: boolean }) { return <div className={`rounded-lg border px-3 py-2 ${pass ? 'border-emerald-300/15 bg-emerald-300/[.06] text-emerald-200' : 'border-white/8 bg-black/10'}`}>{pass ? '已通过' : '未通过'} · {label}</div>; }
+function modelName(value: string) { return value === 'v3-shadow-calibrated' ? 'V3 校准融合模型' : value.startsWith('v2-') ? 'V2 基本面融合模型' : value; }
+function decisionLabel(value: string) { return ({ collecting: '收集样本中', hold: '暂不升级', promote: '准备升级', rollback: '已自动回退' } as Record<string, string>)[value] ?? value; }

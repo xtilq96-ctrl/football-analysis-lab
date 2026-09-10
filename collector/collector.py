@@ -651,6 +651,56 @@ def blend_fundamentals(base: dict[str, Any], fundamentals: dict[str, Any]) -> di
     }
 
 
+SHADOW_MODEL_VERSION = "v3-shadow-calibrated"
+
+
+def calibrated_candidate(base: dict[str, Any], primary: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a conservative challenger without changing the live recommendation."""
+    market = base.get("probabilities")
+    adjusted = primary.get("probabilities")
+    if not isinstance(market, dict) or not isinstance(adjusted, dict):
+        return None
+    keys = ("home", "draw", "away")
+    values = [float(adjusted[key]) * 0.75 + float(market[key]) * 0.25 for key in keys]
+    total = sum(values)
+    values = [round(value / total * 100, 2) for value in values]
+    labels = ["主胜", "平局", "客胜"]
+    ordered = sorted(values, reverse=True)
+    gap = ordered[0] - ordered[1]
+    return {
+        **primary,
+        **score_model(values),
+        "modelVersion": SHADOW_MODEL_VERSION,
+        "probabilities": dict(zip(keys, values)),
+        "prediction": labels[values.index(max(values))],
+        "confidence": round(max(values), 2),
+        "risk": "低风险" if gap >= 25 else "中风险" if gap >= 12 else "高风险",
+        "candidateMode": "shadow",
+    }
+
+
+def apply_model_policy(
+    connection: sqlite3.Connection,
+    item: dict[str, Any],
+    base: dict[str, Any],
+    primary: dict[str, Any],
+) -> None:
+    candidate = calibrated_candidate(base, primary)
+    if candidate is None:
+        item["analysis"] = primary
+        item["modelCandidates"] = []
+        return
+    row = connection.execute(
+        "SELECT value FROM collector_state WHERE key='active_model_version'"
+    ).fetchone()
+    if row and row[0] == SHADOW_MODEL_VERSION:
+        item["analysis"] = {**candidate, "candidateMode": "promoted"}
+        item["modelCandidates"] = [primary]
+    else:
+        item["analysis"] = primary
+        item["modelCandidates"] = [candidate]
+
+
 def build_recommendations(
     matches: list[dict[str, Any]],
     business_dates: list[str],
@@ -905,6 +955,20 @@ CREATE TABLE IF NOT EXISTS prediction_settlements (
   evaluation_payload TEXT,
   settled_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS model_evaluations (
+  match_id TEXT NOT NULL,
+  model_version TEXT NOT NULL,
+  is_primary INTEGER NOT NULL DEFAULT 0,
+  predicted_outcome TEXT,
+  confidence REAL,
+  outcome_hit INTEGER,
+  brier_score REAL,
+  log_loss REAL,
+  settled_at TEXT NOT NULL,
+  PRIMARY KEY(match_id, model_version)
+);
+CREATE INDEX IF NOT EXISTS model_evaluations_version_time
+  ON model_evaluations(model_version, settled_at);
 CREATE TABLE IF NOT EXISTS two_leg_recommendations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   business_date TEXT NOT NULL,
@@ -1175,13 +1239,19 @@ def enrich_fundamentals(
                     frozen = json.loads(locked[0])
                     item["analysis"] = frozen.get("analysis", item["analysis"])
                     item["fundamentals"] = frozen.get("fundamentals")
+                    item["modelCandidates"] = frozen.get("modelCandidates", [])
                 else:
                     fundamentals = official_history_fundamentals(connection, item, collected_at)
-                    item["analysis"] = blend_fundamentals(item["analysis"], fundamentals)
+                    base_analysis = item["analysis"]
+                    primary_analysis = blend_fundamentals(base_analysis, fundamentals)
+                    apply_model_policy(connection, item, base_analysis, primary_analysis)
                     item["fundamentals"] = fundamentals
                     enriched_count += int(fundamentals["coverage"] == 4)
                     if item["analysisSchedule"]["isLocked"]:
-                        frozen = {"analysis": item["analysis"], "fundamentals": fundamentals}
+                        frozen = {
+                            "analysis": item["analysis"], "fundamentals": fundamentals,
+                            "modelCandidates": item.get("modelCandidates", []),
+                        }
                         connection.execute(
                             "INSERT OR IGNORE INTO locked_predictions(match_id,payload,locked_at) VALUES (?,?,?)",
                             (match_id, json.dumps(frozen, ensure_ascii=False, separators=(",", ":")), collected_at),
@@ -1251,10 +1321,12 @@ def enrich_fundamentals(
         for match_id, item in normalized_by_id.items():
             schedule = analysis_schedule(item, now)
             item["analysisSchedule"] = schedule
+            base_analysis = item["analysis"]
             mapping = mapped.get(match_id)
             if not mapping:
                 fundamentals = official_history_fundamentals(connection, item, collected_at)
-                item["analysis"] = blend_fundamentals(item["analysis"], fundamentals)
+                primary_analysis = blend_fundamentals(base_analysis, fundamentals)
+                apply_model_policy(connection, item, base_analysis, primary_analysis)
                 item["fundamentals"] = fundamentals
                 enriched_count += int(fundamentals["coverage"] == 4)
             else:
@@ -1309,7 +1381,8 @@ def enrich_fundamentals(
                         },
                     },
                 }
-                item["analysis"] = blend_fundamentals(item["analysis"], fundamentals)
+                primary_analysis = blend_fundamentals(base_analysis, fundamentals)
+                apply_model_policy(connection, item, base_analysis, primary_analysis)
                 item["fundamentals"] = fundamentals
                 enriched_count += int(history_ready)
 
@@ -1320,8 +1393,12 @@ def enrich_fundamentals(
                 frozen = json.loads(locked[0])
                 item["analysis"] = frozen.get("analysis", item["analysis"])
                 item["fundamentals"] = frozen.get("fundamentals", item.get("fundamentals"))
+                item["modelCandidates"] = frozen.get("modelCandidates", [])
             elif schedule["isLocked"]:
-                frozen = {"analysis": item["analysis"], "fundamentals": item.get("fundamentals")}
+                frozen = {
+                    "analysis": item["analysis"], "fundamentals": item.get("fundamentals"),
+                    "modelCandidates": item.get("modelCandidates", []),
+                }
                 connection.execute(
                     "INSERT INTO locked_predictions(match_id,payload,locked_at) VALUES (?,?,?)",
                     (match_id, json.dumps(frozen, ensure_ascii=False, separators=(",", ":")), collected_at),
@@ -1331,6 +1408,58 @@ def enrich_fundamentals(
                 (json.dumps(item, ensure_ascii=False, separators=(",", ":")), match_id),
             )
     return {"matched": len(mapped), "enriched": enriched_count, "lineups": lineup_count}
+
+
+def model_evaluation(analysis: dict[str, Any], actual_outcome: str) -> dict[str, Any] | None:
+    probabilities = analysis.get("probabilities") or {}
+    if not isinstance(probabilities, dict):
+        return None
+    values = [float(probabilities.get(key) or 0) / 100 for key in ("home", "draw", "away")]
+    if not 0.99 <= sum(values) <= 1.01:
+        return None
+    actual_index = {"主胜": 0, "平局": 1, "客胜": 2}[actual_outcome]
+    predicted = analysis.get("prediction")
+    return {
+        "modelVersion": str(analysis.get("modelVersion") or "unknown"),
+        "predictedOutcome": predicted,
+        "confidence": float(analysis.get("confidence") or 0),
+        "outcomeHit": int(predicted == actual_outcome) if predicted else None,
+        "brierScore": round(sum(
+            (probability - (1.0 if index == actual_index else 0.0)) ** 2
+            for index, probability in enumerate(values)
+        ) / 3, 4),
+        "logLoss": round(-math.log(max(0.000001, values[actual_index])), 4),
+    }
+
+
+def save_model_evaluations(
+    connection: sqlite3.Connection,
+    match_id: str,
+    primary: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    actual_outcome: str,
+    settled_at: str,
+) -> None:
+    for is_primary, analysis in [(1, primary), *((0, item) for item in candidates)]:
+        evaluation = model_evaluation(analysis, actual_outcome)
+        if evaluation is None:
+            continue
+        connection.execute(
+            """INSERT INTO model_evaluations
+               (match_id,model_version,is_primary,predicted_outcome,confidence,outcome_hit,
+                brier_score,log_loss,settled_at) VALUES (?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(match_id,model_version) DO UPDATE SET
+                 is_primary=excluded.is_primary,predicted_outcome=excluded.predicted_outcome,
+                 confidence=excluded.confidence,outcome_hit=excluded.outcome_hit,
+                 brier_score=excluded.brier_score,log_loss=excluded.log_loss,
+                 settled_at=excluded.settled_at""",
+            (
+                match_id, evaluation["modelVersion"], is_primary,
+                evaluation["predictedOutcome"], evaluation["confidence"],
+                evaluation["outcomeHit"], evaluation["brierScore"],
+                evaluation["logLoss"], settled_at,
+            ),
+        )
 
 
 def settle_match_results(
@@ -1376,6 +1505,14 @@ def settle_match_results(
             if prediction_row is None:
                 continue
             prediction = json.loads(prediction_row[0])
+            locked_row = connection.execute(
+                "SELECT payload FROM locked_predictions WHERE match_id=?", (match_id,)
+            ).fetchone()
+            if locked_row:
+                frozen = json.loads(locked_row[0])
+                prediction["analysis"] = frozen.get("analysis", prediction.get("analysis"))
+                prediction["fundamentals"] = frozen.get("fundamentals", prediction.get("fundamentals"))
+                prediction["modelCandidates"] = frozen.get("modelCandidates", [])
             analysis = prediction.get("analysis") or {}
             predicted_outcome = analysis.get("prediction")
             predicted_score = analysis.get("predictedScore")
@@ -1443,6 +1580,10 @@ def settle_match_results(
                     total_hit, over_under_hit, evaluation_payload, settled_at,
                 ),
             )
+            save_model_evaluations(
+                connection, match_id, analysis, prediction.get("modelCandidates") or [],
+                actual_outcome, settled_at,
+            )
             settled += 1
     return completed, settled
 
@@ -1499,6 +1640,138 @@ def settle_combo_recommendations(connection: sqlite3.Connection, settled_at: str
                 )
                 count += 1
     return count
+
+
+def aggregate_model_rows(rows: list[tuple[Any, Any, Any, Any]]) -> dict[str, Any]:
+    usable = [row for row in rows if row[0] is not None and row[1] is not None]
+    if not usable:
+        return {
+            "sampleSize": 0, "outcomeHitRate": None, "brierScore": None,
+            "logLoss": None, "calibrationError": None,
+        }
+    sample = len(usable)
+    hit_rate = sum(int(row[0]) for row in usable) / sample * 100
+    calibration_error = sum(abs(float(row[3]) - int(row[0]) * 100) for row in usable) / sample
+    return {
+        "sampleSize": sample,
+        "outcomeHitRate": round(hit_rate, 1),
+        "brierScore": round(sum(float(row[1]) for row in usable) / sample, 4),
+        "logLoss": round(sum(float(row[2]) for row in usable) / sample, 4),
+        "calibrationError": round(calibration_error, 1),
+    }
+
+
+def model_governance_summary(connection: sqlite3.Connection) -> dict[str, Any]:
+    paired = connection.execute(
+        """SELECT c.outcome_hit,c.brier_score,c.log_loss,c.confidence,
+                  b.outcome_hit,b.brier_score,b.log_loss,b.confidence,b.model_version,c.settled_at,c.match_id
+           FROM model_evaluations c
+           JOIN model_evaluations b ON b.match_id=c.match_id AND b.model_version<>c.model_version
+           WHERE c.model_version=?
+           ORDER BY c.settled_at DESC""",
+        (SHADOW_MODEL_VERSION,),
+    ).fetchall()
+    # One baseline evaluation per match is expected. Guard against duplicates if
+    # more challengers are added later.
+    unique: list[tuple[Any, ...]] = []
+    seen: set[str] = set()
+    for row in paired:
+        identity = str(row[10])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(row)
+    candidate = aggregate_model_rows([tuple(row[:4]) for row in unique])
+    baseline = aggregate_model_rows([tuple(row[4:8]) for row in unique])
+    recent = unique[:30]
+    candidate_recent = aggregate_model_rows([tuple(row[:4]) for row in recent])
+    baseline_recent = aggregate_model_rows([tuple(row[4:8]) for row in recent])
+    baseline_versions: dict[str, int] = {}
+    for row in unique:
+        baseline_versions[str(row[8])] = baseline_versions.get(str(row[8]), 0) + 1
+    baseline_version = max(baseline_versions, key=baseline_versions.get) if baseline_versions else "v2-market-official-history"
+
+    minimum = 60
+    gates = {
+        "enoughSamples": candidate["sampleSize"] >= minimum,
+        "brierImproved": (
+            candidate["brierScore"] is not None and baseline["brierScore"] is not None
+            and candidate["brierScore"] <= baseline["brierScore"] - 0.005
+        ),
+        "hitRateStable": (
+            candidate["outcomeHitRate"] is not None and baseline["outcomeHitRate"] is not None
+            and candidate["outcomeHitRate"] >= baseline["outcomeHitRate"] - 2
+        ),
+        "recentStable": (
+            candidate_recent["sampleSize"] >= 30
+            and candidate_recent["brierScore"] is not None and baseline_recent["brierScore"] is not None
+            and candidate_recent["brierScore"] <= baseline_recent["brierScore"] + 0.01
+        ),
+    }
+    state = connection.execute(
+        "SELECT value FROM collector_state WHERE key='active_model_version'"
+    ).fetchone()
+    active = state[0] if state else "default"
+    passed = all(gates.values())
+    decision = "collecting"
+    message = f"候选模型正在影子测试，还需至少 {max(0, minimum - candidate['sampleSize'])} 场配对样本。"
+    if candidate["sampleSize"] >= minimum:
+        decision = "promote" if passed else "hold"
+        message = "候选模型通过全部门槛，将在下一轮自动启用。" if passed else "候选模型未通过全部门槛，继续保留现行模型。"
+    if passed and active != SHADOW_MODEL_VERSION:
+        connection.execute(
+            """INSERT INTO collector_state(key,value) VALUES ('active_model_version',?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+            (SHADOW_MODEL_VERSION,),
+        )
+        active = SHADOW_MODEL_VERSION
+    if active == SHADOW_MODEL_VERSION and candidate_recent["sampleSize"] >= 30:
+        degraded = (
+            candidate_recent["brierScore"] > baseline_recent["brierScore"] + 0.02
+            or candidate_recent["outcomeHitRate"] < baseline_recent["outcomeHitRate"] - 5
+        )
+        if degraded:
+            connection.execute(
+                """INSERT INTO collector_state(key,value) VALUES ('active_model_version','default')
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value"""
+            )
+            active = "default"
+            decision = "rollback"
+            message = "候选模型近期明显退化，系统已自动回退现行模型。"
+    connection.commit()
+    return {
+        "activeModel": SHADOW_MODEL_VERSION if active == SHADOW_MODEL_VERSION else baseline_version,
+        "candidateModel": SHADOW_MODEL_VERSION,
+        "decision": decision,
+        "message": message,
+        "minimumSampleSize": minimum,
+        "pairedSampleSize": candidate["sampleSize"],
+        "baseline": baseline,
+        "candidate": candidate,
+        "baselineRecent30": baseline_recent,
+        "candidateRecent30": candidate_recent,
+        "gates": gates,
+    }
+
+
+def settlement_period_summary(connection: sqlite3.Connection, since: str | None = None) -> dict[str, Any]:
+    where = " WHERE settled_at>=?" if since else ""
+    params = (since,) if since else ()
+    row = connection.execute(
+        """SELECT COUNT(*),COALESCE(SUM(outcome_hit),0),COALESCE(SUM(score_hit),0),
+                  COALESCE(SUM(total_goals_hit),0),COALESCE(SUM(over_under_hit),0)
+           FROM prediction_settlements""" + where,
+        params,
+    ).fetchone()
+    sample = int(row[0])
+    rate = lambda hits: round(int(hits) / sample * 100, 1) if sample else None
+    return {
+        "sampleSize": sample,
+        "outcomeHitRate": rate(row[1]),
+        "exactScoreHitRate": rate(row[2]),
+        "totalGoalsHitRate": rate(row[3]),
+        "overUnderHitRate": rate(row[4]),
+    }
 
 
 def performance_summary(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -1567,6 +1840,9 @@ def performance_summary(connection: sqlite3.Connection) -> dict[str, Any]:
     )
     all_probability = probability_metrics(evaluation_rows)
     recent_probability = probability_metrics(evaluation_rows[:30])
+    recent_7_days = settlement_period_summary(
+        connection, (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+    )
     return {
         "settledMatches": total,
         "outcomeHits": int(row[1]),
@@ -1588,9 +1864,11 @@ def performance_summary(connection: sqlite3.Connection) -> dict[str, Any]:
             for leg_count, values in combo_stats.items()
         ],
         "probabilityEvaluation": all_probability,
+        "recent7Days": recent_7_days,
         "recent30": recent_probability,
         "calibration": calibration,
         "calibrationError": calibration_error,
+        "modelGovernance": model_governance_summary(connection),
     }
 
 
@@ -1731,6 +2009,7 @@ def run_once(args: argparse.Namespace) -> int:
                             frozen = json.loads(locked[0])
                             item["analysis"] = frozen.get("analysis", item["analysis"])
                             item["fundamentals"] = frozen.get("fundamentals")
+                            item["modelCandidates"] = frozen.get("modelCandidates", [])
                         else:
                             fundamentals = official_history_fundamentals(
                                 connection, item, collected_at
@@ -1740,8 +2019,19 @@ def run_once(args: argparse.Namespace) -> int:
                                 if fundamentals["coverage"] else
                                 "专业数据源暂不可用且历史样本不足，继续使用市场概率"
                             )
-                            item["analysis"] = blend_fundamentals(item["analysis"], fundamentals)
+                            base_analysis = item["analysis"]
+                            primary_analysis = blend_fundamentals(base_analysis, fundamentals)
+                            apply_model_policy(connection, item, base_analysis, primary_analysis)
                             item["fundamentals"] = fundamentals
+                            if item["analysisSchedule"]["isLocked"]:
+                                frozen = {
+                                    "analysis": item["analysis"], "fundamentals": fundamentals,
+                                    "modelCandidates": item.get("modelCandidates", []),
+                                }
+                                connection.execute(
+                                    "INSERT OR IGNORE INTO locked_predictions(match_id,payload,locked_at) VALUES (?,?,?)",
+                                    (match_id, json.dumps(frozen, ensure_ascii=False, separators=(",", ":")), collected_at),
+                                )
                         connection.execute(
                             "UPDATE current_matches SET payload=? WHERE match_id=?",
                             (json.dumps(item, ensure_ascii=False, separators=(",", ":")), match_id),
