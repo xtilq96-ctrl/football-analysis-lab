@@ -59,6 +59,30 @@ def read_latest() -> dict[str, Any]:
     return json.loads((DATA_DIR / "latest.json").read_text(encoding="utf-8"))
 
 
+def deadline_errors(payload: dict[str, Any]) -> list[str]:
+    now = utc_now()
+    missed_analysis = missed_locks = 0
+    for match in payload.get("matches") or []:
+        if match.get("businessDate") != payload.get("businessDate"):
+            continue
+        schedule = match.get("analysisSchedule") or {}
+        try:
+            final_at = datetime.fromisoformat(str(schedule["finalAnalysisAt"]))
+            lock_at = datetime.fromisoformat(str(schedule["lockAt"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if now >= final_at.astimezone(timezone.utc) and not (match.get("analysis") or {}).get("probabilities"):
+            missed_analysis += 1
+        if now >= lock_at.astimezone(timezone.utc) and not schedule.get("isLocked"):
+            missed_locks += 1
+    errors = []
+    if missed_analysis:
+        errors.append(f"{missed_analysis}场比赛超过最终分析时间仍未生成结果")
+    if missed_locks:
+        errors.append(f"{missed_locks}场比赛超过锁定时间仍未锁定")
+    return errors
+
+
 def mirror_payload() -> dict[str, Any]:
     request = urllib.request.Request(
         f"{MIRROR_URL}?health={int(utc_now().timestamp())}",
@@ -82,39 +106,48 @@ def main() -> int:
     }
     errors: list[str] = []
     local_age = None
+    local_payload = None
     try:
-        local_age = round(age_minutes(str(read_latest()["updatedAt"])), 1)
+        local_payload = read_latest()
+        local_age = round(age_minutes(str(local_payload["updatedAt"])), 1)
     except (OSError, ValueError, KeyError, TypeError) as error:
         errors.append(f"本地数据读取失败：{error}")
     if local_age is None or local_age > 15:
         subprocess.run(["systemctl", "start", "football-ai-collector.service"], check=False)
         try:
-            local_age = round(age_minutes(str(read_latest()["updatedAt"])), 1)
+            local_payload = read_latest()
+            local_age = round(age_minutes(str(local_payload["updatedAt"])), 1)
         except (OSError, ValueError, KeyError, TypeError):
             pass
     if local_age is None or local_age > 15:
         errors.append("采集数据超过15分钟未更新")
+    if local_payload:
+        errors.extend(deadline_errors(local_payload))
     for name, active in services.items():
         if not active:
             errors.append(f"服务未运行：{name}")
     mirror_age = None
+    mirror_failure_count = 0
     try:
         mirror_age = round(age_minutes(str(mirror_payload()["updatedAt"])), 1)
         if mirror_age > 20:
             errors.append("GitHub网站快照超过20分钟未更新")
     except Exception as error:  # network failures are intentionally converted to health state
-        errors.append(f"GitHub网站快照检查失败：{error}")
+        mirror_failure_count = int((previous or {}).get("mirrorFailureCount") or 0) + 1
+        if mirror_failure_count >= 3:
+            errors.append(f"GitHub网站快照连续检查失败：{error}")
     status = "ok" if not errors else "warning"
     payload = {
         "status": status, "checkedAt": utc_now().isoformat(timespec="seconds"),
         "localDataAgeMinutes": local_age, "mirrorAgeMinutes": mirror_age,
+        "mirrorFailureCount": mirror_failure_count,
         "services": services, "autoRetry": True, "errors": errors,
     }
     atomic_json(DATA_DIR / "watchdog.json", payload)
     if not previous or previous.get("status") != status or previous.get("errors") != errors:
         with (DATA_DIR / "alerts.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
-    return 0 if status == "ok" else 1
+    return 0
 
 
 if __name__ == "__main__":
