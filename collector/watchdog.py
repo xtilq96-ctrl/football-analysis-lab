@@ -66,7 +66,7 @@ def read_latest() -> dict[str, Any]:
 
 def deadline_errors(payload: dict[str, Any]) -> list[str]:
     now = utc_now()
-    missed_analysis = missed_locks = 0
+    missed_analysis = missing_had = missed_locks = 0
     for match in payload.get("matches") or []:
         if match.get("businessDate") != payload.get("businessDate"):
             continue
@@ -77,10 +77,15 @@ def deadline_errors(payload: dict[str, Any]) -> list[str]:
         except (KeyError, TypeError, ValueError):
             continue
         if now >= final_at.astimezone(timezone.utc) and not (match.get("analysis") or {}).get("probabilities"):
-            missed_analysis += 1
+            if not match.get("had"):
+                missing_had += 1
+            else:
+                missed_analysis += 1
         if now >= lock_at.astimezone(timezone.utc) and not schedule.get("isLocked"):
             missed_locks += 1
     errors = []
+    if missing_had:
+        errors.append(f"{missing_had}场比赛因体彩未提供胜平负赔率，最终分析保持待评估")
     if missed_analysis:
         errors.append(f"{missed_analysis}场比赛超过最终分析时间仍未生成结果")
     if missed_locks:
