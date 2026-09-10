@@ -23,8 +23,9 @@ MIRROR_URL = os.environ.get(
 )
 MIRROR_FALLBACK_URL = os.environ.get(
     "FOOTBALL_AI_MIRROR_FALLBACK_URL",
-    "https://cdn.jsdelivr.net/gh/xtilq96-ctrl/football-analysis-lab@live-data/latest.json",
+    "https://api.github.com/repos/xtilq96-ctrl/football-analysis-lab/contents/latest.json?ref=live-data",
 )
+MIRROR_CDN_URL = "https://cdn.jsdelivr.net/gh/xtilq96-ctrl/football-analysis-lab@live-data/latest.json"
 
 
 def utc_now() -> datetime:
@@ -89,10 +90,14 @@ def deadline_errors(payload: dict[str, Any]) -> list[str]:
 
 def mirror_payload() -> dict[str, Any]:
     failures = []
-    for url in dict.fromkeys((MIRROR_URL, MIRROR_FALLBACK_URL)):
+    for url in dict.fromkeys((MIRROR_URL, MIRROR_FALLBACK_URL, MIRROR_CDN_URL)):
+        separator = "&" if "?" in url else "?"
         request = urllib.request.Request(
-            f"{url}?health={int(utc_now().timestamp())}",
-            headers={"Accept": "application/json", "User-Agent": "FootballAIWatchdog/1.0"},
+            f"{url}{separator}health={int(utc_now().timestamp())}",
+            headers={
+                "Accept": "application/vnd.github.raw+json",
+                "User-Agent": "FootballAIWatchdog/1.0",
+            },
         )
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
