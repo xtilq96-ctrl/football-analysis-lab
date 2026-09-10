@@ -1872,6 +1872,90 @@ def performance_summary(connection: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def daily_report_summaries(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """SELECT predicted_outcome,predicted_score,predicted_total_goals,actual_outcome,
+                  actual_score,outcome_hit,score_hit,total_goals_hit,over_under_hit,
+                  evaluation_payload,settled_at
+           FROM prediction_settlements ORDER BY settled_at DESC"""
+    ).fetchall()
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        with contextlib.suppress(ValueError, TypeError):
+            evaluation = json.loads(row[9]) if row[9] else {}
+            business_date = str(evaluation.get("businessDate") or "")
+            if not business_date:
+                continue
+            report = grouped.setdefault(business_date, {
+                "businessDate": business_date, "settledMatches": 0,
+                "outcomeHits": 0, "exactScoreHits": 0, "totalGoalsHits": 0,
+                "overUnderHits": 0, "updatedAt": row[10], "matches": [],
+            })
+            report["settledMatches"] += 1
+            report["outcomeHits"] += int(row[5] or 0)
+            report["exactScoreHits"] += int(row[6] or 0)
+            report["totalGoalsHits"] += int(row[7] or 0)
+            report["overUnderHits"] += int(row[8] or 0)
+            if len(report["matches"]) < 20:
+                report["matches"].append({
+                    "officialNumber": evaluation.get("officialNumber"),
+                    "predictedOutcome": row[0], "actualOutcome": row[3],
+                    "predictedScore": row[1], "actualScore": row[4],
+                    "outcomeHit": bool(row[5]) if row[5] is not None else None,
+                })
+    rate = lambda hits, sample: round(hits / sample * 100, 1) if sample else None
+    reports = []
+    for report in grouped.values():
+        sample = report["settledMatches"]
+        report.update({
+            "outcomeHitRate": rate(report["outcomeHits"], sample),
+            "exactScoreHitRate": rate(report["exactScoreHits"], sample),
+            "totalGoalsHitRate": rate(report["totalGoalsHits"], sample),
+            "overUnderHitRate": rate(report["overUnderHits"], sample),
+        })
+        reports.append(report)
+    return sorted(reports, key=lambda item: item["businessDate"], reverse=True)[:7]
+
+
+def operations_summary(
+    connection: sqlite3.Connection,
+    matches: list[dict[str, Any]],
+    collected_at: str,
+    data_dir: Path,
+) -> dict[str, Any]:
+    analysis_ready = sum(1 for item in matches if (item.get("analysis") or {}).get("probabilities"))
+    locked = sum(1 for item in matches if (item.get("analysisSchedule") or {}).get("isLocked"))
+    future_final = sorted(
+        str((item.get("analysisSchedule") or {}).get("finalAnalysisAt"))
+        for item in matches
+        if (item.get("analysisSchedule") or {}).get("finalAnalysisAt")
+        and str((item.get("analysisSchedule") or {}).get("finalAnalysisAt")) > now_shanghai().isoformat()
+    )
+    backups = sorted((data_dir / "backups").glob("football-ai-*.sqlite3.gz"), reverse=True)
+    backup_at = None
+    if backups:
+        backup_at = datetime.fromtimestamp(backups[0].stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+    watchdog = None
+    with contextlib.suppress(OSError, ValueError):
+        watchdog = json.loads((data_dir / "watchdog.json").read_text(encoding="utf-8"))
+    return {
+        "collector": {"status": "ok", "intervalMinutes": 5, "staleAfterMinutes": 15, "updatedAt": collected_at},
+        "analysis": {
+            "readyMatches": analysis_ready, "totalMatches": len(matches),
+            "lockedMatches": locked, "nextFinalAnalysisAt": future_final[0] if future_final else None,
+        },
+        "backup": {
+            "status": "ok" if backup_at else "pending", "latestAt": backup_at,
+            "retentionDays": 30,
+        },
+        "watchdog": watchdog,
+        "dataProvider": {
+            "sporttery": "ok", "professionalFundamentals": "pending",
+            "message": "伤停与首发等待专业数据源恢复",
+        },
+    }
+
+
 def export_current(
     connection: sqlite3.Connection,
     output: Path,
@@ -1915,6 +1999,8 @@ def export_current(
     save_combo_recommendations(connection, recommendations, collected_at)
     settle_combo_recommendations(connection, collected_at)
     performance = performance_summary(connection)
+    daily_reports = daily_report_summaries(connection)
+    operations = operations_summary(connection, matches, collected_at, output.parent)
     atomic_json(
         output,
         {
@@ -1927,6 +2013,8 @@ def export_current(
             "recommendations": recommendations,
             "recommendationDecisions": recommendation_decisions,
             "performance": performance,
+            "dailyReports": daily_reports,
+            "operations": operations,
         },
     )
     return len(matches)

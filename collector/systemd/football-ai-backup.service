@@ -1,0 +1,15 @@
+[Unit]
+Description=Back up Football AI database
+After=football-ai-collector.service
+
+[Service]
+Type=oneshot
+User=football-ai
+Group=football-ai
+ExecStart=/opt/football-ai/collector/backup.py
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/football-ai

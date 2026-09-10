@@ -94,6 +94,18 @@ export type ModelGovernance = {
   candidateRecent30: ProbabilityMetrics;
   gates: { enoughSamples: boolean; brierImproved: boolean; hitRateStable: boolean; recentStable: boolean };
 };
+export type DailyReport = {
+  businessDate: string; settledMatches: number; outcomeHitRate: number | null;
+  exactScoreHitRate: number | null; totalGoalsHitRate: number | null;
+  overUnderHitRate: number | null; updatedAt: string;
+};
+export type OperationsSummary = {
+  collector: { status: string; intervalMinutes: number; staleAfterMinutes: number; updatedAt: string };
+  analysis: { readyMatches: number; totalMatches: number; lockedMatches: number; nextFinalAnalysisAt: string | null };
+  backup: { status: string; latestAt: string | null; retentionDays: number };
+  watchdog?: { status: string; checkedAt: string; localDataAgeMinutes: number | null; mirrorAgeMinutes: number | null; autoRetry: boolean; errors: string[] } | null;
+  dataProvider: { sporttery: string; professionalFundamentals: string; message: string };
+};
 type SportteryMatch = {
   matchId: number;
   matchNum: number;
@@ -171,6 +183,8 @@ type RelayPayload = {
   recommendations?: Record<string, DashboardRecommendation[]>;
   recommendationDecisions?: Record<string, RecommendationDecision>;
   performance?: PerformanceSummary;
+  dailyReports?: DailyReport[];
+  operations?: OperationsSummary;
 };
 
 const VERIFIED_SNAPSHOT_2026_09_08: SportteryMatch[] = [
@@ -230,7 +244,7 @@ export type DashboardMatch = {
   settlement: MatchSettlement | null;
 };
 
-export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; recommendationDecision: RecommendationDecision | null; performance: PerformanceSummary; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
+export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; recommendationDecision: RecommendationDecision | null; performance: PerformanceSummary; dailyReports: DailyReport[]; operations: OperationsSummary | null; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
 
 function shanghaiDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -395,6 +409,8 @@ export async function getDashboardData(): Promise<DashboardData> {
   let recommendations: DashboardRecommendation[] = [];
   let recommendationDecision: RecommendationDecision | null = null;
   let performance = EMPTY_PERFORMANCE;
+  let dailyReports: DailyReport[] = [];
+  let operations: OperationsSummary | null = null;
   try {
     let source: SportteryMatch[] = [];
     try {
@@ -405,6 +421,8 @@ export async function getDashboardData(): Promise<DashboardData> {
       recommendations = relay.recommendations?.[businessDate] ?? [];
       recommendationDecision = relay.recommendationDecisions?.[businessDate] ?? null;
       performance = relay.performance ?? EMPTY_PERFORMANCE;
+      dailyReports = relay.dailyReports ?? [];
+      operations = relay.operations ?? null;
       if (businessDate === '2026-09-08') {
         const merged = new Map(VERIFIED_SNAPSHOT_2026_09_08.map((item) => [item.matchId, item]));
         source.forEach((item) => merged.set(item.matchId, item));
@@ -469,8 +487,8 @@ export async function getDashboardData(): Promise<DashboardData> {
         settlement: item.settlement ?? null,
       };
     });
-    return { matches, recommendations, recommendationDecision, performance, updatedAt, businessDate, sourceMode };
+    return { matches, recommendations, recommendationDecision, performance, dailyReports, operations, updatedAt, businessDate, sourceMode };
   } catch (error) {
-    return { matches: [], recommendations: [], recommendationDecision, performance, updatedAt, businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
+    return { matches: [], recommendations: [], recommendationDecision, performance, dailyReports, operations, updatedAt, businessDate, sourceMode, error: error instanceof Error ? error.message : '体彩官方数据暂时不可用' };
   }
 }

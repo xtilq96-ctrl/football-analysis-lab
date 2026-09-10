@@ -1,0 +1,10 @@
+[Unit]
+Description=Create a daily Football AI database backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

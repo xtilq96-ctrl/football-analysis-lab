@@ -19,6 +19,9 @@
 - 专业数据源可用时再补充伤停停赛和临场首发，失败时自动回退官方历史样本
 - 早场按开赛时间提前分析，并在开赛前 60 分钟或业务日 21:00（取更早者）锁定
 - API-Football 密钥只放在服务器私有配置中，不进入 GitHub、网站或日志
+- 守护任务每 5 分钟检查采集、签名中继、Nginx 和 GitHub 网站快照；数据过期时自动重跑采集
+- 每天 03:30 使用 SQLite 在线备份生成压缩数据库副本，保留 30 天
+- 完赛后按体彩业务日自动生成最近 7 份预测复盘
 
 ## Ubuntu 22.04 安装
 
@@ -32,6 +35,8 @@ sudo ./collector/install.sh
 
 ```bash
 sudo systemctl status football-ai-collector.service
+sudo systemctl status football-ai-watchdog.timer
+sudo systemctl status football-ai-backup.timer
 sudo journalctl -u football-ai-collector.service -n 50 --no-pager
 sudo cat /var/lib/football-ai/health.json
 ```

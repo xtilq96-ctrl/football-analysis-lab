@@ -46,6 +46,11 @@ export default async function EvaluationPage() {
       <SectionCard title="算法口径"><p className="text-sm leading-7 text-white/55">胜平负先由体彩固定奖去水，再用近期状态、主客场攻防和赛程做有限修正。比分与总进球来自和胜平负概率相匹配的泊松分布。</p><p className="mt-3 text-sm leading-7 text-white/55">Brier误差和对数损失用于衡量概率本身是否可靠，不只判断最高概率选项有没有猜中。</p></SectionCard>
       <SectionCard title="升级纪律"><p className="text-sm leading-7 text-white/55">当前数据只用于持续观察。达到足够样本后，候选模型必须同时通过命中率、概率校准和近期稳定性测试，才允许升级；否则继续保留现有模型。</p><p className="mt-3 text-xs text-white/35">历史表现不代表未来结果，系统不作收益承诺。</p></SectionCard>
     </div>
+    <div className="mt-4">
+      <SectionCard title="每日预测复盘">
+        {data.dailyReports.length ? <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-sm"><thead className="text-white/35"><tr className="border-b border-white/8"><th className="pb-3 font-normal">体彩业务日</th><th className="pb-3 font-normal">已结算</th><th className="pb-3 font-normal">胜平负</th><th className="pb-3 font-normal">精确比分</th><th className="pb-3 font-normal">总进球</th><th className="pb-3 font-normal">大小2.5</th></tr></thead><tbody>{data.dailyReports.map((item) => <tr key={item.businessDate} className="border-b border-white/6 last:border-0"><td className="py-3 text-white/70">{item.businessDate}</td><td className="py-3 text-white/45">{item.settledMatches}场</td><td className="py-3 text-white/60">{rate(item.outcomeHitRate)}</td><td className="py-3 text-white/60">{rate(item.exactScoreHitRate)}</td><td className="py-3 text-white/60">{rate(item.totalGoalsHitRate)}</td><td className="py-3 text-white/60">{rate(item.overUnderHitRate)}</td></tr>)}</tbody></table></div> : <p className="text-sm text-white/45">比赛完赛并取得官方赛果后，系统会自动生成当天复盘。</p>}
+      </SectionCard>
+    </div>
   </DashboardSectionShell>;
 }
 

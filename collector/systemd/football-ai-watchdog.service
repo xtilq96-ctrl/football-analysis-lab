@@ -1,0 +1,14 @@
+[Unit]
+Description=Football AI self-healing health check
+After=network-online.target football-ai-relay.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/football-ai/collector/watchdog.py
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/football-ai
