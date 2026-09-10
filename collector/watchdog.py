@@ -21,6 +21,10 @@ MIRROR_URL = os.environ.get(
     "FOOTBALL_AI_MIRROR_URL",
     "https://raw.githubusercontent.com/xtilq96-ctrl/football-analysis-lab/live-data/latest.json",
 )
+MIRROR_FALLBACK_URL = os.environ.get(
+    "FOOTBALL_AI_MIRROR_FALLBACK_URL",
+    "https://cdn.jsdelivr.net/gh/xtilq96-ctrl/football-analysis-lab@live-data/latest.json",
+)
 
 
 def utc_now() -> datetime:
@@ -84,15 +88,21 @@ def deadline_errors(payload: dict[str, Any]) -> list[str]:
 
 
 def mirror_payload() -> dict[str, Any]:
-    request = urllib.request.Request(
-        f"{MIRROR_URL}?health={int(utc_now().timestamp())}",
-        headers={"Accept": "application/json", "User-Agent": "FootballAIWatchdog/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=20) as response:
-        envelope = json.loads(response.read())
-    if envelope.get("bodyBase64"):
-        return json.loads(base64.b64decode(envelope["bodyBase64"]))
-    return json.loads(envelope["body"])
+    failures = []
+    for url in dict.fromkeys((MIRROR_URL, MIRROR_FALLBACK_URL)):
+        request = urllib.request.Request(
+            f"{url}?health={int(utc_now().timestamp())}",
+            headers={"Accept": "application/json", "User-Agent": "FootballAIWatchdog/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                envelope = json.loads(response.read())
+            if envelope.get("bodyBase64"):
+                return json.loads(base64.b64decode(envelope["bodyBase64"]))
+            return json.loads(envelope["body"])
+        except Exception as error:  # try the next GitHub-backed endpoint
+            failures.append(f"{url}: {error}")
+    raise RuntimeError("；".join(failures))
 
 
 def main() -> int:
