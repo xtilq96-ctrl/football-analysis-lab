@@ -289,7 +289,8 @@ async function verifyRelayBytes(bytes: Uint8Array, signatureValue: string, relay
   const key = await crypto.subtle.importKey(
     'raw', new TextEncoder().encode(relaySecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'],
   );
-  const valid = await crypto.subtle.verify('HMAC', key, signature, bytes);
+  const signedBytes = bytes.slice().buffer as ArrayBuffer;
+  const valid = await crypto.subtle.verify('HMAC', key, signature, signedBytes);
   if (!valid) throw new Error('大陆采集节点签名校验失败');
   const payload = JSON.parse(new TextDecoder().decode(bytes)) as RelayPayload;
   if (!payload.updatedAt || !payload.businessDate || !Array.isArray(payload.matches) || payload.count !== payload.matches.length) {
