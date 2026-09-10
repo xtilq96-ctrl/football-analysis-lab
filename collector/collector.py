@@ -1750,15 +1750,19 @@ def run_once(args: argparse.Namespace) -> int:
                 connection, data_dir / "latest.json", collected_at, live_business_dates
             )
             website_push_error = None
-            try:
-                push_latest_to_site(
-                    data_dir / "latest.json", args.website_push_url,
-                    args.website_push_auth_token, Path(args.relay_secret_file),
-                    args.timeout, args.retries,
-                )
-            except Exception as error:
-                website_push_error = str(error)
-                logging.warning("website push skipped: %s", error)
+            website_push_status = "disabled"
+            if args.website_push_url:
+                try:
+                    push_latest_to_site(
+                        data_dir / "latest.json", args.website_push_url,
+                        args.website_push_auth_token, Path(args.relay_secret_file),
+                        args.timeout, args.retries,
+                    )
+                    website_push_status = "ok"
+                except Exception as error:
+                    website_push_error = str(error)
+                    website_push_status = "warning"
+                    logging.warning("website push failed: %s", error)
             save_raw_snapshot(data_dir, raw, args.retention_days)
             health = {
                 "status": "ok", "checkedAt": collected_at, "liveMatchCount": live_count,
@@ -1774,7 +1778,7 @@ def run_once(args: argparse.Namespace) -> int:
                 "fundamentalMatchedCount": fundamental_stats["matched"],
                 "fundamentalEnrichedCount": fundamental_stats["enriched"],
                 "confirmedLineupCount": fundamental_stats["lineups"],
-                "websitePushStatus": "ok" if website_push_error is None else "warning",
+                "websitePushStatus": website_push_status,
                 "source": "中国体育彩票官方接口",
             }
             if result_error:
