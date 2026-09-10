@@ -1,0 +1,51 @@
+name: Sync live Sporttery data
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: live-sporttery-data
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Download signed collector snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 3 \
+            --dump-header headers.txt \
+            --output body.json \
+            https://118.195.198.175/api/latest
+          jq -e '.count == (.matches | length) and .count > 0 and (.updatedAt | type == "string")' body.json >/dev/null
+          signature="$(awk 'BEGIN { IGNORECASE=1 } /^x-football-signature:/ { gsub("\\r", "", $2); print $2 }' headers.txt | tail -n 1)"
+          test -n "$signature"
+          jq -Rs --arg signature "$signature" '{body: ., signature: $signature}' body.json > latest.json
+
+      - name: Publish one-file live-data branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init publish
+          cd publish
+          git config user.name "football-ai-bot"
+          git config user.email "football-ai-bot@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git checkout --orphan live-data
+          cp ../latest.json latest.json
+          printf '%s\n' '# Football AI live data' > README.md
+          git add latest.json README.md
+          git commit -m "Update live Sporttery data"
+          git push --force origin live-data

@@ -13,6 +13,7 @@ import contextlib
 import functools
 import gzip
 import hashlib
+import hmac
 import json
 import logging
 import math

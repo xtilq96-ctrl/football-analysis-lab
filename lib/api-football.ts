@@ -299,7 +299,14 @@ async function verifiedRelayData(): Promise<RelayPayload> {
   const response = await fetch(relayUrl, { headers: { Accept: 'application/json' }, cache: 'no-store' });
   if (!response.ok) throw new Error(`大陆采集节点返回 ${response.status}`);
   const body = await response.text();
-  return verifyRelayBody(body, response.headers.get('X-Football-Signature') ?? '', relaySecret);
+  const responseSignature = response.headers.get('X-Football-Signature') ?? '';
+  if (responseSignature) return verifyRelayBody(body, responseSignature, relaySecret);
+
+  // GitHub mirrors the signed relay response as an envelope because raw-file
+  // responses cannot preserve the original HTTP signature header.
+  const envelope = JSON.parse(body) as { body?: string; signature?: string };
+  if (!envelope.body || !envelope.signature) throw new Error('大陆采集节点签名缺失');
+  return verifyRelayBody(envelope.body, envelope.signature, relaySecret);
 }
 
 function relayMatch(item: RelayMatch): SportteryMatch {
