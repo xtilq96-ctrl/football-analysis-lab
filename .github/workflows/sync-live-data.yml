@@ -23,16 +23,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --retry 3 \
-            --dump-header headers.txt \
-            --output body.json \
-            https://118.195.198.175/api/latest
-          jq -e '.count == (.matches | length) and .count > 0 and (.updatedAt | type == "string")' body.json >/dev/null
-          signature="$(awk 'BEGIN { IGNORECASE=1 } /^x-football-signature:/ { gsub("\\r", "", $2); print $2 }' headers.txt | tail -n 1)"
-          test -n "$signature"
-          body_base64="$(base64 -w 0 body.json)"
-          jq -n --arg bodyBase64 "$body_base64" --arg signature "$signature" \
-            '{bodyBase64: $bodyBase64, signature: $signature}' > latest.json
+          python3 - <<'PY'
+          import base64
+          import json
+          import time
+          import urllib.request
+
+          url = "https://118.195.198.175/api/latest"
+          for attempt in range(4):
+              try:
+                  request = urllib.request.Request(
+                      url,
+                      headers={"Accept": "application/json", "User-Agent": "FootballAI-GitHub-Sync/2.0"},
+                  )
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      body = response.read()
+                      signature = response.headers.get("X-Football-Signature", "")
+                  payload = json.loads(body)
+                  if not signature or payload.get("count") != len(payload.get("matches", [])) or not payload.get("count"):
+                      raise RuntimeError("collector snapshot validation failed")
+                  with open("latest.json", "w", encoding="utf-8") as stream:
+                      json.dump(
+                          {"bodyBase64": base64.b64encode(body).decode("ascii"), "signature": signature},
+                          stream,
+                          separators=(",", ":"),
+                      )
+                      stream.write("\n")
+                  break
+              except Exception:
+                  if attempt == 3:
+                      raise
+                  time.sleep(2 ** attempt)
+          PY
 
       - name: Publish one-file live-data branch
         env:
