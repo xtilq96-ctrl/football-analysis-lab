@@ -1290,22 +1290,24 @@ def enrich_fundamentals(
             mapped[match_id] = (fixture, confidence)
 
     histories: dict[int, list[dict[str, Any]]] = {}
-    for fixture, _confidence in mapped.values():
-        teams = fixture.get("teams") or {}
-        for side in ("home", "away"):
-            team_id = int(((teams.get(side) or {}).get("id") or 0))
-            if team_id and team_id not in histories:
-                try:
-                    histories[team_id] = api_football_request(
-                        connection, api_key, "fixtures",
-                        {"team": team_id, "last": 10, "timezone": "Asia/Shanghai"},
-                        timedelta(hours=24), timeout, retries,
-                    )
-                except RuntimeError as error:
-                    # Some teams in cup/minor competitions fall outside the
-                    # seasons exposed by the free plan. Keep the usable teams.
-                    logging.warning("API-Football history unavailable for team %s: %s", team_id, error)
-                    histories[team_id] = []
+    history_enabled = os.environ.get("API_FOOTBALL_HISTORY_ENABLED", "").lower() in {"1", "true", "yes"}
+    if history_enabled:
+        for fixture, _confidence in mapped.values():
+            teams = fixture.get("teams") or {}
+            for side in ("home", "away"):
+                team_id = int(((teams.get(side) or {}).get("id") or 0))
+                if team_id and team_id not in histories:
+                    try:
+                        histories[team_id] = api_football_request(
+                            connection, api_key, "fixtures",
+                            {"team": team_id, "last": 10, "timezone": "Asia/Shanghai"},
+                            timedelta(hours=24), timeout, retries,
+                        )
+                    except RuntimeError as error:
+                        logging.warning("API-Football history unavailable for team %s: %s", team_id, error)
+                        histories[team_id] = []
+    else:
+        logging.info("API-Football team history disabled; using official Sporttery history")
 
     injuries_by_date: dict[str, list[dict[str, Any]] | None] = {}
     for date in dates:
