@@ -1295,10 +1295,17 @@ def enrich_fundamentals(
         for side in ("home", "away"):
             team_id = int(((teams.get(side) or {}).get("id") or 0))
             if team_id and team_id not in histories:
-                histories[team_id] = api_football_request(
-                    connection, api_key, "fixtures", {"team": team_id, "last": 10, "timezone": "Asia/Shanghai"},
-                    timedelta(hours=24), timeout, retries,
-                )
+                try:
+                    histories[team_id] = api_football_request(
+                        connection, api_key, "fixtures",
+                        {"team": team_id, "last": 10, "timezone": "Asia/Shanghai"},
+                        timedelta(hours=24), timeout, retries,
+                    )
+                except RuntimeError as error:
+                    # Some teams in cup/minor competitions fall outside the
+                    # seasons exposed by the free plan. Keep the usable teams.
+                    logging.warning("API-Football history unavailable for team %s: %s", team_id, error)
+                    histories[team_id] = []
 
     injuries_by_date: dict[str, list[dict[str, Any]] | None] = {}
     for date in dates:
@@ -1325,10 +1332,15 @@ def enrich_fundamentals(
     details: dict[int, dict[str, Any]] = {}
     for start in range(0, len(detail_candidates), 20):
         ids = "-".join(str(value) for value in detail_candidates[start:start + 20])
-        for item in api_football_request(
-            connection, api_key, "fixtures", {"ids": ids, "timezone": "Asia/Shanghai"},
-            timedelta(minutes=30), timeout, retries,
-        ):
+        try:
+            detail_items = api_football_request(
+                connection, api_key, "fixtures", {"ids": ids, "timezone": "Asia/Shanghai"},
+                timedelta(minutes=30), timeout, retries,
+            )
+        except RuntimeError as error:
+            logging.warning("API-Football lineups unavailable for fixture batch: %s", error)
+            detail_items = []
+        for item in detail_items:
             fixture_id = int(((item.get("fixture") or {}).get("id") or 0))
             if fixture_id:
                 details[fixture_id] = item
