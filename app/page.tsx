@@ -71,7 +71,7 @@ export default async function Home() {
 
           <div className={`mb-5 flex items-start gap-3 rounded-2xl p-4 text-sm ${data.error ? 'border border-amber-400/15 bg-amber-400/[.065] text-amber-100/75' : 'border border-sky-400/15 bg-sky-400/[.065] text-sky-100/75'}`}>
             <CircleAlert className={`mt-0.5 h-4 w-4 shrink-0 ${data.error ? 'text-amber-300' : 'text-sky-300'}`} />
-            <p>{data.error ? <><span className="font-medium">官方数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : data.sourceMode === 'verified_snapshot' ? <><span className="font-medium text-sky-200">已显示官方核验快照。</span> 自动采集数据暂时不可用，页面会继续重试。</> : data.sourceMode === 'mainland_relay' ? <><span className="font-medium text-sky-200">南京采集节点运行正常。</span> 每5分钟读取中国体育彩票官方数据并校验签名，已开赛场次与赔率变化持续留存。</> : <><span className="font-medium text-sky-200">官方数据已连接。</span> 场次、时间和固定奖来自中国体育彩票公开接口；概率由官方固定奖去水换算。</>}</p>
+            <p>{data.error ? <><span className="font-medium">官方数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : data.sourceMode === 'verified_snapshot' ? <><span className="font-medium text-sky-200">已显示官方核验快照。</span> 自动采集数据暂时不可用，页面会继续重试。</> : data.sourceMode === 'stale_relay' ? <><span className="font-medium text-amber-200">正在使用最近一次安全快照。</span> 多路数据源会自动重试，页面不会因短时缓存故障清空。</> : data.sourceMode === 'mainland_relay' ? <><span className="font-medium text-sky-200">南京采集节点运行正常。</span> 每5分钟读取中国体育彩票官方数据并校验签名，已开赛场次与赔率变化持续留存。</> : <><span className="font-medium text-sky-200">官方数据已连接。</span> 场次、时间和固定奖来自中国体育彩票公开接口；概率由官方固定奖去水换算。</>}</p>
           </div>
 
           <RecommendationPanel recommendations={data.recommendations} decision={data.recommendationDecision} />
@@ -93,7 +93,7 @@ export default async function Home() {
               <StatusRow label="体彩历史基本面" value={fundamentalsReady ? '已生成' : '回填中'} meta={`${fundamentalsReady}/${data.matches.length} 场 · 近120天样本`} muted={!fundamentalsReady} />
               <StatusRow label="伤停与临场首发" value={lineupsReady ? '已确认' : '等待专业源'} meta={`${lineupsReady} 场双方首发确认`} muted={!lineupsReady} />
               <StatusRow label="赛果自动结算" value={data.performance.settledMatches ? '已运行' : '等待完赛'} meta={`${data.performance.settledMatches} 场已核对`} muted={!data.performance.settledMatches} />
-              <StatusRow label="数据模式" value={data.sourceMode === 'mainland_relay' ? '大陆自动采集' : data.sourceMode === 'live' ? '官方直连' : '官方快照'} meta={data.sourceMode === 'mainland_relay' ? '每 5 分钟更新' : data.sourceMode === 'live' ? '实时读取' : '自动恢复中'} muted={data.sourceMode === 'verified_snapshot'} />
+              <StatusRow label="数据模式" value={data.sourceMode === 'mainland_relay' ? '大陆自动采集' : data.sourceMode === 'stale_relay' ? '安全快照' : data.sourceMode === 'live' ? '官方直连' : '官方快照'} meta={data.sourceMode === 'mainland_relay' ? '每 5 分钟更新' : data.sourceMode === 'live' ? '实时读取' : '多路自动恢复中'} muted={data.sourceMode === 'verified_snapshot' || data.sourceMode === 'stale_relay'} />
             </CardContent>
           </Card>
           <Card className="overflow-hidden border-lime-300/12 bg-[linear-gradient(145deg,rgba(190,242,100,.09),rgba(255,255,255,.025))] shadow-none">

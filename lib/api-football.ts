@@ -187,6 +187,11 @@ type RelayPayload = {
   operations?: OperationsSummary;
 };
 
+type VerifiedRelayResult = {
+  payload: RelayPayload;
+  recoveredFromCache: boolean;
+};
+
 const VERIFIED_SNAPSHOT_2026_09_08: SportteryMatch[] = [
   { matchId: 2041345, matchNum: 2001, matchNumStr: '周二001', matchWeek: '周二', businessDate: '2026-09-08', matchDate: '2026-09-08', matchTime: '18:30:00', leagueAllName: '韩国职业联赛', homeTeamAllName: '蔚山现代', awayTeamAllName: '首尔FC', sellStatus: '1', had: { h: '3.29', d: '3.58', a: '1.83', updateDate: '2026-09-08', updateTime: '15:49:37' }, hhad: { h: '1.74', d: '3.80', a: '3.43', goalLine: '+1' } },
   { matchId: 2041346, matchNum: 2002, matchNumStr: '周二002', matchWeek: '周二', businessDate: '2026-09-08', matchDate: '2026-09-09', matchTime: '00:45:00', leagueAllName: '欧洲冠军联赛', homeTeamAllName: '雅典AEK', awayTeamAllName: 'LASK林茨', sellStatus: '1', had: { h: '1.59', d: '3.85', a: '4.15', updateDate: '2026-09-08', updateTime: '12:46:01' }, hhad: { h: '2.73', d: '3.70', a: '2.03', goalLine: '-1' } },
@@ -244,7 +249,7 @@ export type DashboardMatch = {
   settlement: MatchSettlement | null;
 };
 
-export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; recommendationDecision: RecommendationDecision | null; performance: PerformanceSummary; dailyReports: DailyReport[]; operations: OperationsSummary | null; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'live' | 'verified_snapshot'; error?: string };
+export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; recommendationDecision: RecommendationDecision | null; performance: PerformanceSummary; dailyReports: DailyReport[]; operations: OperationsSummary | null; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'stale_relay' | 'live' | 'verified_snapshot'; error?: string };
 
 function shanghaiDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -293,11 +298,11 @@ function fromHex(value: string) {
   return Uint8Array.from(value.match(/.{2}/g) ?? [], (byte) => Number.parseInt(byte, 16));
 }
 
-async function verifyRelayBody(body: string, signatureValue: string, relaySecret: string): Promise<RelayPayload> {
-  return verifyRelayBytes(new TextEncoder().encode(body), signatureValue, relaySecret);
+async function verifyRelayBody(body: string, signatureValue: string, relaySecret: string, maxAgeMs = 20 * 60_000): Promise<RelayPayload> {
+  return verifyRelayBytes(new TextEncoder().encode(body), signatureValue, relaySecret, maxAgeMs);
 }
 
-async function verifyRelayBytes(bytes: Uint8Array, signatureValue: string, relaySecret: string): Promise<RelayPayload> {
+async function verifyRelayBytes(bytes: Uint8Array, signatureValue: string, relaySecret: string, maxAgeMs = 20 * 60_000): Promise<RelayPayload> {
   const signature = fromHex(signatureValue);
   if (!signature) throw new Error('大陆采集节点签名缺失');
   const key = await crypto.subtle.importKey(
@@ -311,11 +316,39 @@ async function verifyRelayBytes(bytes: Uint8Array, signatureValue: string, relay
     throw new Error('大陆采集节点数据结构异常');
   }
   const age = Date.now() - Date.parse(payload.updatedAt);
-  if (!Number.isFinite(age) || age < -5 * 60_000 || age > 20 * 60_000) throw new Error('大陆采集节点数据已过期');
+  if (!Number.isFinite(age) || age < -5 * 60_000 || age > maxAgeMs) throw new Error('大陆采集节点数据已过期');
   return payload;
 }
 
-async function verifiedRelayData(): Promise<RelayPayload> {
+async function verifyRelayResponse(body: string, responseSignature: string, relaySecret: string, maxAgeMs = 20 * 60_000): Promise<RelayPayload> {
+  if (responseSignature) return verifyRelayBody(body, responseSignature, relaySecret, maxAgeMs);
+  const envelope = JSON.parse(body) as { body?: string; bodyBase64?: string; signature?: string };
+  if (!envelope.signature) throw new Error('大陆采集节点签名缺失');
+  if (envelope.bodyBase64) {
+    const binary = atob(envelope.bodyBase64);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    return verifyRelayBytes(bytes, envelope.signature, relaySecret, maxAgeMs);
+  }
+  if (!envelope.body) throw new Error('大陆采集节点签名缺失');
+  return verifyRelayBody(envelope.body, envelope.signature, relaySecret, maxAgeMs);
+}
+
+function relayMirrorUrls(primary: string): string[] {
+  return [...new Set([
+    primary,
+    'https://raw.githubusercontent.com/xtilq96-ctrl/football-analysis-lab/live-data/latest.json',
+    'https://cdn.jsdelivr.net/gh/xtilq96-ctrl/football-analysis-lab@live-data/latest.json',
+    'https://raw.githack.com/xtilq96-ctrl/football-analysis-lab/live-data/latest.json',
+  ].filter(Boolean))];
+}
+
+function cacheBustedRelayUrl(value: string): string {
+  const url = new URL(value);
+  url.searchParams.set('_football_ai_minute', String(Math.floor(Date.now() / 60_000)));
+  return url.toString();
+}
+
+async function verifiedRelayData(): Promise<VerifiedRelayResult> {
   const relayUrl = env.FOOTBALL_AI_RELAY_URL;
   const relaySecret = env.FOOTBALL_AI_RELAY_SECRET;
   if (!relaySecret) throw new Error('大陆采集节点尚未配置');
@@ -325,29 +358,55 @@ async function verifiedRelayData(): Promise<RelayPayload> {
     ).bind('football-ai:relay-push', Date.now()).first<{ payload: string }>();
     if (cached?.payload) {
       const envelope = JSON.parse(cached.payload) as { body?: string; signature?: string };
-      if (envelope.body && envelope.signature) return await verifyRelayBody(envelope.body, envelope.signature, relaySecret);
+      if (envelope.body && envelope.signature) {
+        return { payload: await verifyRelayBody(envelope.body, envelope.signature, relaySecret), recoveredFromCache: false };
+      }
     }
   } catch (cacheError) {
     console.warn('pushed relay cache unavailable', cacheError instanceof Error ? cacheError.message : 'unknown cache error');
   }
   if (!relayUrl) throw new Error('大陆采集节点尚未配置');
-  const response = await fetch(relayUrl, { headers: { Accept: 'application/json' }, cache: 'no-store' });
-  if (!response.ok) throw new Error(`大陆采集节点返回 ${response.status}`);
-  const body = await response.text();
-  const responseSignature = response.headers.get('X-Football-Signature') ?? '';
-  if (responseSignature) return verifyRelayBody(body, responseSignature, relaySecret);
-
-  // GitHub mirrors the signed relay response as an envelope because raw-file
-  // responses cannot preserve the original HTTP signature header.
-  const envelope = JSON.parse(body) as { body?: string; bodyBase64?: string; signature?: string };
-  if (!envelope.signature) throw new Error('大陆采集节点签名缺失');
-  if (envelope.bodyBase64) {
-    const binary = atob(envelope.bodyBase64);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    return verifyRelayBytes(bytes, envelope.signature, relaySecret);
+  const failures: string[] = [];
+  for (const candidate of relayMirrorUrls(relayUrl)) {
+    try {
+      const response = await fetch(cacheBustedRelayUrl(candidate), { headers: { Accept: 'application/json' }, cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.text();
+      const responseSignature = response.headers.get('X-Football-Signature') ?? '';
+      const payload = await verifyRelayResponse(body, responseSignature, relaySecret);
+      const cachedEnvelope = JSON.stringify({ body, responseSignature });
+      const now = Date.now();
+      try {
+        await env.DB.prepare(
+          `INSERT INTO api_cache (cache_key, payload, expires_at, updated_at) VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload, expires_at=excluded.expires_at, updated_at=excluded.updated_at`,
+        ).bind('football-ai:relay-mirror', cachedEnvelope, now + 6 * 60 * 60_000, now).run();
+      } catch (cacheError) {
+        console.warn('relay mirror cache write unavailable', cacheError instanceof Error ? cacheError.message : 'unknown cache error');
+      }
+      return { payload, recoveredFromCache: false };
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : 'unknown mirror error');
+    }
   }
-  if (!envelope.body) throw new Error('大陆采集节点签名缺失');
-  return verifyRelayBody(envelope.body, envelope.signature, relaySecret);
+
+  try {
+    const cached = await env.DB.prepare(
+      'SELECT payload FROM api_cache WHERE cache_key = ?1 AND expires_at > ?2',
+    ).bind('football-ai:relay-mirror', Date.now()).first<{ payload: string }>();
+    if (cached?.payload) {
+      const envelope = JSON.parse(cached.payload) as { body?: string; responseSignature?: string };
+      if (envelope.body) {
+        return {
+          payload: await verifyRelayResponse(envelope.body, envelope.responseSignature ?? '', relaySecret, 6 * 60 * 60_000),
+          recoveredFromCache: true,
+        };
+      }
+    }
+  } catch (cacheError) {
+    failures.push(cacheError instanceof Error ? cacheError.message : 'mirror recovery cache unavailable');
+  }
+  throw new Error(`大陆采集镜像暂时不可用：${failures.slice(0, 2).join('；')}`);
 }
 
 function relayMatch(item: RelayMatch): SportteryMatch {
@@ -414,7 +473,9 @@ export async function getDashboardData(): Promise<DashboardData> {
   try {
     let source: SportteryMatch[] = [];
     try {
-      const relay = await verifiedRelayData();
+      const relayResult = await verifiedRelayData();
+      const relay = relayResult.payload;
+      if (relayResult.recoveredFromCache) sourceMode = 'stale_relay';
       businessDate = relay.businessDate;
       updatedAt = relay.updatedAt;
       source = relay.matches.filter((item) => item.businessDate === businessDate).map(relayMatch);
