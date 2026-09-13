@@ -192,6 +192,9 @@ type VerifiedRelayResult = {
   recoveredFromCache: boolean;
 };
 
+const RELAY_FRESH_MS = 20 * 60_000;
+const RELAY_RECOVERY_MS = 6 * 60 * 60_000;
+
 const VERIFIED_SNAPSHOT_2026_09_08: SportteryMatch[] = [
   { matchId: 2041345, matchNum: 2001, matchNumStr: '周二001', matchWeek: '周二', businessDate: '2026-09-08', matchDate: '2026-09-08', matchTime: '18:30:00', leagueAllName: '韩国职业联赛', homeTeamAllName: '蔚山现代', awayTeamAllName: '首尔FC', sellStatus: '1', had: { h: '3.29', d: '3.58', a: '1.83', updateDate: '2026-09-08', updateTime: '15:49:37' }, hhad: { h: '1.74', d: '3.80', a: '3.43', goalLine: '+1' } },
   { matchId: 2041346, matchNum: 2002, matchNumStr: '周二002', matchWeek: '周二', businessDate: '2026-09-08', matchDate: '2026-09-09', matchTime: '00:45:00', leagueAllName: '欧洲冠军联赛', homeTeamAllName: '雅典AEK', awayTeamAllName: 'LASK林茨', sellStatus: '1', had: { h: '1.59', d: '3.85', a: '4.15', updateDate: '2026-09-08', updateTime: '12:46:01' }, hhad: { h: '2.73', d: '3.70', a: '2.03', goalLine: '-1' } },
@@ -335,6 +338,7 @@ async function verifyRelayResponse(body: string, responseSignature: string, rela
 
 function relayMirrorUrls(primary: string): string[] {
   return [...new Set([
+    'https://118.195.198.175/api/latest',
     primary,
     'https://raw.githubusercontent.com/xtilq96-ctrl/football-analysis-lab/live-data/latest.json',
     'https://cdn.jsdelivr.net/gh/xtilq96-ctrl/football-analysis-lab@live-data/latest.json',
@@ -346,6 +350,14 @@ function cacheBustedRelayUrl(value: string): string {
   const url = new URL(value);
   url.searchParams.set('_football_ai_minute', String(Math.floor(Date.now() / 60_000)));
   return url.toString();
+}
+
+async function cacheRelayMirror(body: string, responseSignature: string): Promise<void> {
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO api_cache (cache_key, payload, expires_at, updated_at) VALUES (?1, ?2, ?3, ?4)
+     ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload, expires_at=excluded.expires_at, updated_at=excluded.updated_at`,
+  ).bind('football-ai:relay-mirror', JSON.stringify({ body, responseSignature }), now + RELAY_RECOVERY_MS, now).run();
 }
 
 async function verifiedRelayData(): Promise<VerifiedRelayResult> {
@@ -367,20 +379,22 @@ async function verifiedRelayData(): Promise<VerifiedRelayResult> {
   }
   if (!relayUrl) throw new Error('大陆采集节点尚未配置');
   const failures: string[] = [];
+  let recoveryCandidate: { payload: RelayPayload; body: string; responseSignature: string } | null = null;
   for (const candidate of relayMirrorUrls(relayUrl)) {
     try {
       const response = await fetch(cacheBustedRelayUrl(candidate), { headers: { Accept: 'application/json' }, cache: 'no-store' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body = await response.text();
       const responseSignature = response.headers.get('X-Football-Signature') ?? '';
-      const payload = await verifyRelayResponse(body, responseSignature, relaySecret);
-      const cachedEnvelope = JSON.stringify({ body, responseSignature });
-      const now = Date.now();
+      const payload = await verifyRelayResponse(body, responseSignature, relaySecret, RELAY_RECOVERY_MS);
+      if (Date.now() - Date.parse(payload.updatedAt) > RELAY_FRESH_MS) {
+        if (!recoveryCandidate || Date.parse(payload.updatedAt) > Date.parse(recoveryCandidate.payload.updatedAt)) {
+          recoveryCandidate = { payload, body, responseSignature };
+        }
+        continue;
+      }
       try {
-        await env.DB.prepare(
-          `INSERT INTO api_cache (cache_key, payload, expires_at, updated_at) VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload, expires_at=excluded.expires_at, updated_at=excluded.updated_at`,
-        ).bind('football-ai:relay-mirror', cachedEnvelope, now + 6 * 60 * 60_000, now).run();
+        await cacheRelayMirror(body, responseSignature);
       } catch (cacheError) {
         console.warn('relay mirror cache write unavailable', cacheError instanceof Error ? cacheError.message : 'unknown cache error');
       }
@@ -388,6 +402,15 @@ async function verifiedRelayData(): Promise<VerifiedRelayResult> {
     } catch (error) {
       failures.push(error instanceof Error ? error.message : 'unknown mirror error');
     }
+  }
+
+  if (recoveryCandidate) {
+    try {
+      await cacheRelayMirror(recoveryCandidate.body, recoveryCandidate.responseSignature);
+    } catch (cacheError) {
+      console.warn('relay recovery cache write unavailable', cacheError instanceof Error ? cacheError.message : 'unknown cache error');
+    }
+    return { payload: recoveryCandidate.payload, recoveredFromCache: true };
   }
 
   try {
@@ -398,7 +421,7 @@ async function verifiedRelayData(): Promise<VerifiedRelayResult> {
       const envelope = JSON.parse(cached.payload) as { body?: string; responseSignature?: string };
       if (envelope.body) {
         return {
-          payload: await verifyRelayResponse(envelope.body, envelope.responseSignature ?? '', relaySecret, 6 * 60 * 60_000),
+          payload: await verifyRelayResponse(envelope.body, envelope.responseSignature ?? '', relaySecret, RELAY_RECOVERY_MS),
           recoveredFromCache: true,
         };
       }
