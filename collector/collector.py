@@ -1267,11 +1267,21 @@ def enrich_fundamentals(
     }
     dates = sorted({item["kickoffDate"] for item in normalized_by_id.values() if item.get("kickoffDate")})
     fixtures_by_date: dict[str, list[dict[str, Any]]] = {}
+    fixture_errors: list[RuntimeError] = []
     for date in dates:
-        fixtures_by_date[date] = api_football_request(
-            connection, api_key, "fixtures", {"date": date, "timezone": "Asia/Shanghai"},
-            timedelta(hours=6), timeout, retries,
-        )
+        try:
+            fixtures_by_date[date] = api_football_request(
+                connection, api_key, "fixtures", {"date": date, "timezone": "Asia/Shanghai"},
+                timedelta(hours=6), timeout, retries,
+            )
+        except RuntimeError as error:
+            # The free plan exposes only a short date window.  One unavailable
+            # future date must not discard valid enrichment for today/tomorrow.
+            logging.warning("API-Football fixtures unavailable for %s: %s", date, error)
+            fixtures_by_date[date] = []
+            fixture_errors.append(error)
+    if dates and len(fixture_errors) == len(dates):
+        raise fixture_errors[0]
 
     mapped: dict[str, tuple[dict[str, Any], float]] = {}
     for match_id, item in normalized_by_id.items():
@@ -1290,12 +1300,19 @@ def enrich_fundamentals(
                     timedelta(hours=24), timeout, retries,
                 )
 
-    injuries_by_date: dict[str, list[dict[str, Any]]] = {}
+    injuries_by_date: dict[str, list[dict[str, Any]] | None] = {}
     for date in dates:
-        injuries_by_date[date] = api_football_request(
-            connection, api_key, "injuries", {"date": date, "timezone": "Asia/Shanghai"},
-            timedelta(hours=4), timeout, retries,
-        )
+        if not fixtures_by_date.get(date):
+            injuries_by_date[date] = None
+            continue
+        try:
+            injuries_by_date[date] = api_football_request(
+                connection, api_key, "injuries", {"date": date, "timezone": "Asia/Shanghai"},
+                timedelta(hours=4), timeout, retries,
+            )
+        except RuntimeError as error:
+            logging.warning("API-Football injuries unavailable for %s: %s", date, error)
+            injuries_by_date[date] = None
 
     now = now_shanghai()
     detail_candidates: list[int] = []
@@ -1341,9 +1358,19 @@ def enrich_fundamentals(
                 kickoff = parse_kickoff(item) or now
                 home_form = team_form_summary(histories.get(home_id, []), home_id, "home", kickoff)
                 away_form = team_form_summary(histories.get(away_id, []), away_id, "away", kickoff)
-                injury_items = injuries_by_date.get(item["kickoffDate"], [])
-                home_absences = absence_summary(injury_items, fixture_id, home_id)
-                away_absences = absence_summary(injury_items, fixture_id, away_id)
+                injury_items = injuries_by_date.get(item["kickoffDate"])
+                if injury_items is None:
+                    unavailable_absences = {
+                        "total": 0, "injuries": 0, "suspensions": 0,
+                        "players": [], "available": False,
+                    }
+                    home_absences = dict(unavailable_absences)
+                    away_absences = dict(unavailable_absences)
+                else:
+                    home_absences = absence_summary(injury_items, fixture_id, home_id)
+                    away_absences = absence_summary(injury_items, fixture_id, away_id)
+                    home_absences["available"] = True
+                    away_absences["available"] = True
                 lineups = (details.get(fixture_id) or {}).get("lineups") or []
                 lineup_by_team = {
                     int(((lineup.get("team") or {}).get("id") or 0)): lineup for lineup in lineups
