@@ -200,6 +200,21 @@ class CollectorTests(unittest.TestCase):
             self.assertIsNone(collector.due_lineup_checkpoint(connection, 99, 10))
             connection.close()
 
+    def test_lineup_plan_rejection_can_pause_only_that_feature(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = collector.connect_database(Path(directory) / "test.sqlite3")
+            collector.set_api_feature_block(
+                connection, "临场首发", "当前套餐不支持临场首发查询"
+            )
+            connection.commit()
+            block = collector.api_feature_block(connection, "临场首发")
+            self.assertIsNotNone(block)
+            self.assertIn("套餐", block["reason"])
+            self.assertIsNone(collector.api_feature_block(connection, "伤停停赛"))
+            usage = collector.api_football_usage_summary(connection)
+            self.assertIn("临场首发", usage["featureBlocks"])
+            connection.close()
+
     def test_matches_api_fixture_and_builds_recent_form(self):
         match = collector.normalized(
             collector.flatten_matches(SAMPLE)[0], "2026-09-08T02:00:00+00:00"

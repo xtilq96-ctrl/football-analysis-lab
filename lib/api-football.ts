@@ -110,7 +110,12 @@ export type OperationsSummary = {
     safeRemaining: number; mode: 'normal' | 'conserve' | 'lineups_only' | 'stopped';
     modeLabel: string; lastRequestAt: string | null; nextResetAt: string;
     byPurpose: Record<string, number>;
+    featureBlocks?: Record<string, { reason: string; blockedAt: string; expiresAt: string }>;
     schedule: { fixtures: string; injuries: string; lineups: string };
+  };
+  professionalData?: {
+    matchedMatches: number; injuryAvailableMatches: number;
+    confirmedLineupMatches: number; totalMatches: number;
   };
   dataProvider: { sporttery: string; professionalFundamentals: string; message: string };
 };
