@@ -203,6 +203,10 @@ def fetch_results(timeout: float, retries: int = 3) -> list[dict[str, Any]]:
     )
 
 
+class APIProviderError(RuntimeError):
+    """A deterministic provider rejection that should not be retried immediately."""
+
+
 def api_football_request(
     connection: sqlite3.Connection,
     api_key: str,
@@ -211,6 +215,8 @@ def api_football_request(
     ttl: timedelta,
     timeout: float,
     retries: int,
+    purpose: str = "general",
+    priority: str = "normal",
 ) -> list[dict[str, Any]]:
     """Fetch one API-Football resource with a persistent, quota-friendly cache."""
     normalized_params = {key: str(value) for key, value in params.items() if value not in (None, "")}
@@ -231,6 +237,30 @@ def api_football_request(
     if query:
         url = f"{url}?{query}"
     for attempt in range(1, retries + 1):
+        usage = api_football_usage_summary(connection)
+        used = int(usage["used"])
+        operational_limit = int(usage["operationalLimit"])
+        mode = str(usage["mode"])
+        blocked = (
+            used >= operational_limit
+            or (mode == "lineups_only" and priority != "critical")
+            or (mode == "conserve" and priority == "low")
+        )
+        if blocked:
+            if cached:
+                logging.warning("API-Football quota guard used stale cache for %s", purpose)
+                payload = json.loads(cached[0])
+                return payload if isinstance(payload, list) else []
+            raise RuntimeError(f"API-Football quota guard blocked {purpose}")
+        requested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        cursor = connection.execute(
+            """INSERT INTO api_request_usage
+               (quota_date,requested_at,endpoint,purpose,priority,status)
+               VALUES (?,?,?,?,?,'started')""",
+            (api_quota_date(), requested_at, endpoint, purpose, priority),
+        )
+        usage_id = int(cursor.lastrowid)
+        connection.commit()
         try:
             request = urllib.request.Request(
                 url,
@@ -242,10 +272,11 @@ def api_football_request(
             )
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read())
+                response_headers = response.headers
             errors = payload.get("errors")
             if errors and errors not in ({}, []):
                 category = next(iter(errors), "request") if isinstance(errors, dict) else "request"
-                raise RuntimeError(f"API-Football {category} error for {endpoint}")
+                raise APIProviderError(f"API-Football {category} error for {endpoint}")
             items = payload.get("response", [])
             if not isinstance(items, list):
                 raise RuntimeError(f"API-Football returned an unexpected {endpoint} payload")
@@ -258,9 +289,40 @@ def api_football_request(
                        expires_at=excluded.expires_at""",
                     (cache_key, serialized, now.isoformat(), (now + ttl).isoformat()),
                 )
+                provider_limit = parse_positive_int(response_headers.get("x-ratelimit-requests-limit"))
+                provider_remaining = parse_positive_int(
+                    response_headers.get("x-ratelimit-requests-remaining"), allow_zero=True
+                )
+                provider_used = (
+                    provider_limit - provider_remaining
+                    if provider_limit is not None and provider_remaining is not None else None
+                )
+                connection.execute(
+                    """UPDATE api_request_usage SET status='success',provider_used=?,provider_limit=?
+                       WHERE id=?""",
+                    (provider_used, provider_limit, usage_id),
+                )
             return items
         except (OSError, ValueError, urllib.error.URLError, RuntimeError) as error:
             last_error = error
+            deterministic = isinstance(error, APIProviderError) or (
+                isinstance(error, urllib.error.HTTPError) and error.code in {400, 401, 403, 429}
+            )
+            with connection:
+                connection.execute(
+                    "UPDATE api_request_usage SET status='error',error=? WHERE id=?",
+                    (str(error)[:500], usage_id),
+                )
+                if deterministic:
+                    suppression_ttl = min(ttl, timedelta(minutes=15)) if isinstance(error, urllib.error.HTTPError) else ttl
+                    connection.execute(
+                        """INSERT INTO api_cache(cache_key,payload,fetched_at,expires_at)
+                           VALUES (?,'[]',?,?) ON CONFLICT(cache_key) DO UPDATE SET
+                           payload='[]',fetched_at=excluded.fetched_at,expires_at=excluded.expires_at""",
+                        (cache_key, now.isoformat(), (now + suppression_ttl).isoformat()),
+                    )
+            if deterministic:
+                break
             if attempt < retries:
                 time.sleep(2 ** (attempt - 1))
     if cached:
@@ -268,6 +330,68 @@ def api_football_request(
         payload = json.loads(cached[0])
         return payload if isinstance(payload, list) else []
     raise RuntimeError(f"API-Football fetch failed for {endpoint}: {last_error}")
+
+
+def parse_positive_int(value: Any, allow_zero: bool = False) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 or (allow_zero and parsed == 0) else None
+
+
+def api_quota_date(now: datetime | None = None) -> str:
+    """Use the provider's UTC quota day for the local safety counter."""
+    return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
+
+
+def api_football_usage_summary(connection: sqlite3.Connection) -> dict[str, Any]:
+    daily_limit = max(1, int(os.environ.get("API_FOOTBALL_DAILY_LIMIT", "100")))
+    reserve = max(0, min(daily_limit, int(os.environ.get("API_FOOTBALL_RESERVE", "15"))))
+    quota_date = api_quota_date()
+    row = connection.execute(
+        """SELECT COUNT(*),MAX(provider_used),MAX(provider_limit),MAX(requested_at)
+           FROM api_request_usage WHERE quota_date=?""",
+        (quota_date,),
+    ).fetchone()
+    local_used = int(row[0] or 0)
+    provider_used = int(row[1]) if row[1] is not None else None
+    provider_limit = int(row[2]) if row[2] is not None else None
+    effective_limit = provider_limit or daily_limit
+    operational_limit = max(0, effective_limit - reserve)
+    used = max(local_used, provider_used or 0)
+    if used >= operational_limit:
+        mode, label = "stopped", "已保护停用"
+    elif used >= 80:
+        mode, label = "lineups_only", "仅保留临场首发"
+    elif used >= 60:
+        mode, label = "conserve", "节省模式"
+    else:
+        mode, label = "normal", "正常"
+    endpoint_rows = connection.execute(
+        """SELECT purpose,COUNT(*) FROM api_request_usage
+           WHERE quota_date=? GROUP BY purpose ORDER BY COUNT(*) DESC""",
+        (quota_date,),
+    ).fetchall()
+    next_reset = datetime.combine(
+        datetime.now(timezone.utc).date() + timedelta(days=1), datetime.min.time(), timezone.utc
+    )
+    return {
+        "quotaDate": quota_date,
+        "used": used,
+        "localUsed": local_used,
+        "providerUsed": provider_used,
+        "dailyLimit": effective_limit,
+        "operationalLimit": operational_limit,
+        "reserve": reserve,
+        "remaining": max(0, effective_limit - used),
+        "safeRemaining": max(0, operational_limit - used),
+        "mode": mode,
+        "modeLabel": label,
+        "lastRequestAt": row[3],
+        "nextResetAt": next_reset.isoformat(timespec="seconds"),
+        "byPurpose": {str(item[0]): int(item[1]) for item in endpoint_rows},
+    }
 
 
 def parse_kickoff(match: dict[str, Any]) -> datetime | None:
@@ -902,6 +1026,26 @@ CREATE TABLE IF NOT EXISTS api_cache (
   fetched_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS api_request_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quota_date TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  endpoint TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  priority TEXT NOT NULL,
+  status TEXT NOT NULL,
+  provider_used INTEGER,
+  provider_limit INTEGER,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_api_request_usage_date
+  ON api_request_usage(quota_date,requested_at);
+CREATE TABLE IF NOT EXISTS api_refresh_checkpoints (
+  fixture_id INTEGER NOT NULL,
+  checkpoint_minutes INTEGER NOT NULL,
+  completed_at TEXT NOT NULL,
+  PRIMARY KEY(fixture_id,checkpoint_minutes)
+);
 CREATE TABLE IF NOT EXISTS collector_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -1002,6 +1146,15 @@ def save_matches(connection: sqlite3.Connection, matches: Iterable[dict[str, Any
     with connection:
         for source in matches:
             item = normalized(source, collected_at)
+            previous = connection.execute(
+                "SELECT payload FROM current_matches WHERE match_id=?", (item["matchId"],)
+            ).fetchone()
+            if previous:
+                with contextlib.suppress(ValueError, TypeError):
+                    previous_item = json.loads(previous[0])
+                    for field in ("fundamentals", "modelCandidates"):
+                        if previous_item.get(field) is not None:
+                            item[field] = previous_item[field]
             serialized = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
             connection.execute(
                 """INSERT INTO current_matches
@@ -1216,6 +1369,43 @@ def official_history_fundamentals(
     }
 
 
+LINEUP_CHECKPOINTS = (180, 90, 45, 20)
+
+
+def due_lineup_checkpoint(
+    connection: sqlite3.Connection, fixture_id: int, minutes_to_kickoff: int
+) -> int | None:
+    if minutes_to_kickoff < -15 or minutes_to_kickoff > LINEUP_CHECKPOINTS[0]:
+        return None
+    eligible = [value for value in LINEUP_CHECKPOINTS if minutes_to_kickoff <= value]
+    completed = {
+        int(row[0]) for row in connection.execute(
+            "SELECT checkpoint_minutes FROM api_refresh_checkpoints WHERE fixture_id=?",
+            (fixture_id,),
+        ).fetchall()
+    }
+    for checkpoint in sorted(eligible):
+        if checkpoint not in completed:
+            return checkpoint
+    return None
+
+
+def mark_lineup_checkpoints(
+    connection: sqlite3.Connection,
+    batch: list[tuple[int, int]],
+    completed_at: str,
+) -> None:
+    with connection:
+        for fixture_id, checkpoint in batch:
+            for value in LINEUP_CHECKPOINTS:
+                if value >= checkpoint:
+                    connection.execute(
+                        """INSERT OR IGNORE INTO api_refresh_checkpoints
+                           (fixture_id,checkpoint_minutes,completed_at) VALUES (?,?,?)""",
+                        (fixture_id, value, completed_at),
+                    )
+
+
 def enrich_fundamentals(
     connection: sqlite3.Connection,
     api_key: str,
@@ -1265,6 +1455,12 @@ def enrich_fundamentals(
     normalized_by_id = {
         str(source["matchId"]): normalized(source, collected_at) for source in source_matches
     }
+    previous_by_id: dict[str, dict[str, Any]] = {}
+    for match_id, payload_text in connection.execute(
+        "SELECT match_id,payload FROM current_matches"
+    ).fetchall():
+        with contextlib.suppress(ValueError, TypeError):
+            previous_by_id[str(match_id)] = json.loads(payload_text)
     dates = sorted({item["kickoffDate"] for item in normalized_by_id.values() if item.get("kickoffDate")})
     fixtures_by_date: dict[str, list[dict[str, Any]]] = {}
     fixture_errors: list[RuntimeError] = []
@@ -1272,7 +1468,7 @@ def enrich_fundamentals(
         try:
             fixtures_by_date[date] = api_football_request(
                 connection, api_key, "fixtures", {"date": date, "timezone": "Asia/Shanghai"},
-                timedelta(hours=6), timeout, retries,
+                timedelta(hours=6), timeout, retries, purpose="赛程匹配", priority="high",
             )
         except RuntimeError as error:
             # The free plan exposes only a short date window.  One unavailable
@@ -1301,7 +1497,7 @@ def enrich_fundamentals(
                         histories[team_id] = api_football_request(
                             connection, api_key, "fixtures",
                             {"team": team_id, "last": 10, "timezone": "Asia/Shanghai"},
-                            timedelta(hours=24), timeout, retries,
+                            timedelta(hours=24), timeout, retries, purpose="球队历史", priority="low",
                         )
                     except RuntimeError as error:
                         logging.warning("API-Football history unavailable for team %s: %s", team_id, error)
@@ -1317,28 +1513,38 @@ def enrich_fundamentals(
         try:
             injuries_by_date[date] = api_football_request(
                 connection, api_key, "injuries", {"date": date, "timezone": "Asia/Shanghai"},
-                timedelta(hours=4), timeout, retries,
+                timedelta(hours=4), timeout, retries, purpose="伤停停赛", priority="high",
             )
         except RuntimeError as error:
             logging.warning("API-Football injuries unavailable for %s: %s", date, error)
             injuries_by_date[date] = None
 
     now = now_shanghai()
-    detail_candidates: list[int] = []
+    detail_candidates: list[tuple[int, int]] = []
     for match_id, (fixture, _confidence) in mapped.items():
         schedule_match = normalized_by_id[match_id]
         kickoff = parse_kickoff(schedule_match)
         fixture_id = int(((fixture.get("fixture") or {}).get("id") or 0))
-        if kickoff and fixture_id and timedelta(minutes=-15) <= kickoff - now <= timedelta(hours=3):
-            detail_candidates.append(fixture_id)
+        previous_fundamentals = (previous_by_id.get(match_id) or {}).get("fundamentals") or {}
+        previous_lineup_confirmed = bool(
+            ((previous_fundamentals.get("home") or {}).get("lineup") or {}).get("confirmed")
+            and ((previous_fundamentals.get("away") or {}).get("lineup") or {}).get("confirmed")
+        )
+        if kickoff and fixture_id and not previous_lineup_confirmed:
+            minutes_to_kickoff = int((kickoff - now).total_seconds() // 60)
+            checkpoint = due_lineup_checkpoint(connection, fixture_id, minutes_to_kickoff)
+            if checkpoint is not None:
+                detail_candidates.append((fixture_id, checkpoint))
     details: dict[int, dict[str, Any]] = {}
     for start in range(0, len(detail_candidates), 20):
-        ids = "-".join(str(value) for value in detail_candidates[start:start + 20])
+        batch = detail_candidates[start:start + 20]
+        ids = "-".join(str(value[0]) for value in batch)
         try:
             detail_items = api_football_request(
                 connection, api_key, "fixtures", {"ids": ids, "timezone": "Asia/Shanghai"},
-                timedelta(minutes=30), timeout, retries,
+                timedelta(minutes=10), timeout, retries, purpose="临场首发", priority="critical",
             )
+            mark_lineup_checkpoints(connection, batch, collected_at)
         except RuntimeError as error:
             logging.warning("API-Football lineups unavailable for fixture batch: %s", error)
             detail_items = []
@@ -1391,7 +1597,16 @@ def enrich_fundamentals(
                 }
                 home_lineup = lineup_by_team.get(home_id) or {}
                 away_lineup = lineup_by_team.get(away_id) or {}
+                previous_fundamentals = (previous_by_id.get(match_id) or {}).get("fundamentals") or {}
+                previous_home_lineup = ((previous_fundamentals.get("home") or {}).get("lineup") or {})
+                previous_away_lineup = ((previous_fundamentals.get("away") or {}).get("lineup") or {})
+                if not home_lineup.get("startXI") and previous_home_lineup.get("confirmed"):
+                    home_lineup = {"preserved": previous_home_lineup}
+                if not away_lineup.get("startXI") and previous_away_lineup.get("confirmed"):
+                    away_lineup = {"preserved": previous_away_lineup}
                 lineup_confirmed = bool(home_lineup.get("startXI") and away_lineup.get("startXI"))
+                if home_lineup.get("preserved") and away_lineup.get("preserved"):
+                    lineup_confirmed = True
                 lineup_count += int(lineup_confirmed)
                 history_ready = bool(home_form.get("matches") and away_form.get("matches"))
                 coverage = (4 if history_ready else 0) + 1 + int(lineup_confirmed)
@@ -1407,18 +1622,18 @@ def enrich_fundamentals(
                         "teamId": home_id, "apiName": str(home_team.get("name") or ""),
                         "form": home_form, "absences": home_absences,
                         "lineup": {
-                            "confirmed": bool(home_lineup.get("startXI")),
-                            "formation": home_lineup.get("formation"),
-                            "startingCount": len(home_lineup.get("startXI") or []),
+                            "confirmed": bool(home_lineup.get("startXI") or home_lineup.get("preserved")),
+                            "formation": home_lineup.get("formation") or (home_lineup.get("preserved") or {}).get("formation"),
+                            "startingCount": len(home_lineup.get("startXI") or []) or int((home_lineup.get("preserved") or {}).get("startingCount") or 0),
                         },
                     },
                     "away": {
                         "teamId": away_id, "apiName": str(away_team.get("name") or ""),
                         "form": away_form, "absences": away_absences,
                         "lineup": {
-                            "confirmed": bool(away_lineup.get("startXI")),
-                            "formation": away_lineup.get("formation"),
-                            "startingCount": len(away_lineup.get("startXI") or []),
+                            "confirmed": bool(away_lineup.get("startXI") or away_lineup.get("preserved")),
+                            "formation": away_lineup.get("formation") or (away_lineup.get("preserved") or {}).get("formation"),
+                            "startingCount": len(away_lineup.get("startXI") or []) or int((away_lineup.get("preserved") or {}).get("startingCount") or 0),
                         },
                     },
                 }
@@ -1979,6 +2194,10 @@ def operations_summary(
     watchdog = None
     with contextlib.suppress(OSError, ValueError):
         watchdog = json.loads((data_dir / "watchdog.json").read_text(encoding="utf-8"))
+    api_usage = api_football_usage_summary(connection)
+    has_professional_data = any(
+        (item.get("fundamentals") or {}).get("source") == "api_football" for item in matches
+    )
     return {
         "collector": {"status": "ok", "intervalMinutes": 5, "staleAfterMinutes": 15, "updatedAt": collected_at},
         "analysis": {
@@ -1990,9 +2209,17 @@ def operations_summary(
             "retentionDays": 30,
         },
         "watchdog": watchdog,
+        "apiFootball": {
+            **api_usage,
+            "schedule": {
+                "fixtures": "每6小时按日期批量刷新",
+                "injuries": "每4小时按日期批量刷新",
+                "lineups": "赛前180/90/45/20分钟",
+            },
+        },
         "dataProvider": {
-            "sporttery": "ok", "professionalFundamentals": "pending",
-            "message": "伤停与首发等待专业数据源恢复",
+            "sporttery": "ok", "professionalFundamentals": "ok" if has_professional_data else "pending",
+            "message": "专业数据已接入并受每日额度保护" if has_professional_data else "专业数据等待首次成功匹配",
         },
     }
 

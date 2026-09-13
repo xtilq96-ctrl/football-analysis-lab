@@ -170,6 +170,36 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(schedule["phase"], "最终分析")
         self.assertEqual(schedule["finalAnalysisAt"][11:16], "17:00")
 
+    def test_api_usage_manager_reserves_fifteen_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = collector.connect_database(Path(directory) / "test.sqlite3")
+            for index in range(80):
+                connection.execute(
+                    """INSERT INTO api_request_usage
+                       (quota_date,requested_at,endpoint,purpose,priority,status)
+                       VALUES (?,?,?,?,?,'success')""",
+                    (collector.api_quota_date(), f"2026-09-13T00:{index % 60:02d}:00+00:00",
+                     "fixtures", "临场首发", "critical"),
+                )
+            connection.commit()
+            usage = collector.api_football_usage_summary(connection)
+            self.assertEqual(usage["dailyLimit"], 100)
+            self.assertEqual(usage["operationalLimit"], 85)
+            self.assertEqual(usage["safeRemaining"], 5)
+            self.assertEqual(usage["mode"], "lineups_only")
+            connection.close()
+
+    def test_lineup_refresh_uses_four_checkpoints_without_backfill(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = collector.connect_database(Path(directory) / "test.sqlite3")
+            self.assertEqual(collector.due_lineup_checkpoint(connection, 99, 170), 180)
+            collector.mark_lineup_checkpoints(connection, [(99, 180)], "2026-09-13T00:00:00+00:00")
+            self.assertIsNone(collector.due_lineup_checkpoint(connection, 99, 170))
+            self.assertEqual(collector.due_lineup_checkpoint(connection, 99, 80), 90)
+            collector.mark_lineup_checkpoints(connection, [(99, 20)], "2026-09-13T02:30:00+00:00")
+            self.assertIsNone(collector.due_lineup_checkpoint(connection, 99, 10))
+            connection.close()
+
     def test_matches_api_fixture_and_builds_recent_form(self):
         match = collector.normalized(
             collector.flatten_matches(SAMPLE)[0], "2026-09-08T02:00:00+00:00"
