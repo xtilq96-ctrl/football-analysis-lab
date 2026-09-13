@@ -69,6 +69,20 @@ class CollectorTests(unittest.TestCase):
         )
         self.assertEqual(len(collector.flatten_matches(duplicate)), 1)
 
+    def test_keeps_only_the_active_sporttery_business_day(self):
+        today_match = collector.flatten_matches(SAMPLE)[0]
+        tomorrow_match = json.loads(json.dumps(today_match, ensure_ascii=False))
+        tomorrow_match.update({
+            "matchId": 2042000, "businessDate": "2026-09-09",
+            "matchNum": 3001, "matchNumStr": "周三001", "sellStatus": "0",
+        })
+        selected_date, selected = collector.select_active_business_matches(
+            [today_match, tomorrow_match],
+            collector.datetime(2026, 9, 8, 23, 0, tzinfo=collector.SHANGHAI),
+        )
+        self.assertEqual(selected_date, "2026-09-08")
+        self.assertEqual([item["matchId"] for item in selected], [2041345])
+
     def test_keeps_match_after_it_disappears_from_live_feed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "test.sqlite3"

@@ -506,6 +506,44 @@ def flatten_matches(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(matches.values(), key=lambda item: int(item.get("matchNum") or 0))
 
 
+def select_active_business_matches(
+    matches: list[dict[str, Any]], now: datetime | None = None
+) -> tuple[str, list[dict[str, Any]]]:
+    """Keep one active Sporttery card instead of mixing adjacent business days."""
+    current = now or now_shanghai()
+    if not matches:
+        return current.date().isoformat(), []
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for match in matches:
+        business_date = str(match.get("businessDate") or "")
+        if business_date:
+            grouped.setdefault(business_date, []).append(match)
+    if not grouped:
+        return current.date().isoformat(), matches
+
+    today = current.date().isoformat()
+    on_sale_counts = {
+        date: sum(1 for item in items if str(item.get("sellStatus") or "") == "1")
+        for date, items in grouped.items()
+    }
+    if today in grouped and on_sale_counts[today] > 0:
+        selected_date = today
+    else:
+        active_not_future = sorted(
+            date for date, count in on_sale_counts.items() if count > 0 and date <= today
+        )
+        active_any = sorted(date for date, count in on_sale_counts.items() if count > 0)
+        if active_not_future:
+            selected_date = active_not_future[-1]
+        elif active_any:
+            selected_date = active_any[0]
+        elif today in grouped:
+            selected_date = today
+        else:
+            selected_date = sorted(grouped)[-1]
+    return selected_date, grouped[selected_date]
+
+
 def decimal_odds(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -2388,12 +2426,11 @@ def run_once(args: argparse.Namespace) -> int:
         connection.commit()
         try:
             payload, raw = fetch_payload(args.url, args.timeout, args.retries)
-            matches = flatten_matches(payload)
+            all_matches = flatten_matches(payload)
+            active_business_date, matches = select_active_business_matches(all_matches)
             collected_at = utc_iso()
             live_count = save_matches(connection, matches, collected_at)
-            live_business_dates = sorted(
-                {str(item.get("businessDate") or "") for item in matches if item.get("businessDate")}
-            )
+            live_business_dates = [active_business_date]
             result_count = settled_count = 0
             result_error = None
             history_saved = 0
