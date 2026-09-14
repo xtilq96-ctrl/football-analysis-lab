@@ -321,6 +321,17 @@ class CollectorTests(unittest.TestCase):
         self.assertGreater(candidate["probabilities"]["away"], base["probabilities"]["away"])
         self.assertLess(candidate["probabilities"]["away"], primary["probabilities"]["away"])
 
+    def test_trained_model_calibrates_probabilities_and_goals(self):
+        analysis = collector.market_analysis(collector.flatten_matches(SAMPLE)[0])
+        trained = collector.apply_trained_model(analysis, {
+            "version": "v4-trained-test", "sampleCount": 100,
+            "parameters": {"temperature": 1.2, "homeGoalScale": 1.1, "awayGoalScale": 0.9},
+        })
+        self.assertEqual(trained["modelVersion"], "v4-trained-test")
+        self.assertEqual(trained["trainingSampleCount"], 100)
+        self.assertAlmostEqual(sum(trained["probabilities"].values()), 100, places=1)
+        self.assertNotEqual(trained["probabilities"], analysis["probabilities"])
+
     def test_model_upgrade_waits_for_enough_paired_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             connection = collector.connect_database(Path(directory) / "test.sqlite3")

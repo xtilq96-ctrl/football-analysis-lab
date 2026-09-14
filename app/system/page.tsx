@@ -13,6 +13,7 @@ export default async function SystemPage() {
   const backupAt = operations?.backup.latestAt ? formatTime(operations.backup.latestAt) : '首次备份执行中';
   const apiUsage = operations?.apiFootball;
   const professional = operations?.professionalData;
+  const training = operations?.training;
   const mappingDiagnostics = professional?.mappingDiagnostics;
   const lineupBlock = apiUsage?.featureBlocks?.['临场首发'];
   const lineupStatus = lineupBlock
@@ -46,6 +47,7 @@ export default async function SystemPage() {
       <SectionCard title="同步与自动恢复"><Rows rows={[["本地数据延迟", watchdog?.localDataAgeMinutes == null ? "等待首轮检查" : `${watchdog.localDataAgeMinutes}分钟`],["网站快照延迟", watchdog?.mirrorAgeMinutes == null ? "等待首轮检查" : `${watchdog.mirrorAgeMinutes}分钟`],["超时标准", `${operations?.collector.staleAfterMinutes ?? 15}分钟`],["自动重试", watchdog?.autoRetry === false ? "关闭" : "已开启"]]} /></SectionCard>
       <SectionCard title="分析时限"><Rows rows={[["分析已生成", `${operations?.analysis.readyMatches ?? data.matches.length}/${operations?.analysis.totalMatches ?? data.matches.length}场`],["已经锁定", `${operations?.analysis.lockedMatches ?? 0}场`],["下一次最终分析", nextAnalysis],["锁定规则", "开赛前60分钟或21:00"]]} /></SectionCard>
       <SectionCard title="球队历史基本面"><Rows rows={[["已生成", `${historyReady}/${data.matches.length}场`],["历史范围", "近120天体彩官方赛果"],["完整回填", "每天1次"],["增量更新", "每5分钟"]]} /></SectionCard>
+      <SectionCard title="自动训练流水线"><Rows rows={[["运行状态", training ? "已自动运行" : "等待首轮训练"],["可用样本", `${training?.sampleCount ?? 0}场`],["训练 / 验证", training ? `${training.trainingCount} / ${training.validationCount}场` : "—"],["本轮决定", training ? trainingDecision(training.decision) : "等待"],["现行训练模型", training?.activeVersion ?? "沿用现行模型"],["下次训练", training?.nextRunAt ? formatTime(training.nextRunAt) : "每天04:10"]]} /></SectionCard>
       <SectionCard title="专业数据覆盖"><Rows rows={[["比赛匹配", `${professional?.matchedMatches ?? 0}/${professional?.totalMatches ?? data.matches.length}场`],["球队别名库", `${professional?.aliasCount ?? 0}条`],["赛程源受限", `${mappingDiagnostics?.date_unavailable ?? 0}场`],["队名待匹配", `${mappingDiagnostics?.team_name_mismatch ?? 0}场`],["时间或覆盖不符", `${mappingDiagnostics?.time_or_coverage_mismatch ?? 0}场`],["伤停停赛", `${professional?.injuryAvailableMatches ?? 0}/${professional?.totalMatches ?? data.matches.length}场已取得`],["正式首发", `${professional?.confirmedLineupMatches ?? lineups}/${professional?.totalMatches ?? data.matches.length}场已确认`],["缺失处理", "明确原因，不猜测"]]} /></SectionCard>
       <SectionCard title="临场首发状态"><Rows rows={[["当前状态", lineupStatus],["限制原因", lineupBlock?.reason ?? "暂无套餐限制"],["再次尝试", lineupBlock ? formatTime(lineupBlock.expiresAt) : "按赛前节点自动检查"],["查询方式", "逐场查询，拒绝后自动暂停"]]} /></SectionCard>
       <SectionCard title="分时刷新调度"><Rows rows={[["赛程匹配", apiUsage?.schedule.fixtures ?? "每6小时按日期批量刷新"],["伤停停赛", apiUsage?.schedule.injuries ?? "每4小时按日期批量刷新"],["临场首发", apiUsage?.schedule.lineups ?? "赛前180/90/45/20分钟"],["已确认首发", "停止重复查询"]]} /></SectionCard>
@@ -61,3 +63,4 @@ function Rows({ rows }: { rows: string[][] }) { return <div className="divide-y 
 function Metric({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-white/8 bg-black/10 px-4 py-3"><p className="text-xs text-white/40">{label}</p><p className="mt-1 font-medium text-white/75">{value}</p></div>; }
 function formatTime(value: string) { return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)); }
 function rate(value: number | null) { return value == null ? '样本不足' : `${value}%`; }
+function trainingDecision(value: 'collecting' | 'hold' | 'promote' | 'rollback') { return ({ collecting: '继续收集样本', hold: '未通过，暂不升级', promote: '通过验证，已启用', rollback: '出现退化，已回退' } as const)[value]; }

@@ -25,6 +25,7 @@ install -o root -g root -m 0755 "${SOURCE_DIR}/collector/collector.py" "${INSTAL
 install -o root -g root -m 0755 "${SOURCE_DIR}/collector/api_server.py" "${INSTALL_DIR}/collector/api_server.py"
 install -o root -g root -m 0755 "${SOURCE_DIR}/collector/watchdog.py" "${INSTALL_DIR}/collector/watchdog.py"
 install -o root -g root -m 0755 "${SOURCE_DIR}/collector/backup.py" "${INSTALL_DIR}/collector/backup.py"
+install -o root -g root -m 0755 "${SOURCE_DIR}/collector/trainer.py" "${INSTALL_DIR}/collector/trainer.py"
 install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-collector.service" /etc/systemd/system/football-ai-collector.service
 install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-collector.timer" /etc/systemd/system/football-ai-collector.timer
 install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-relay.service" /etc/systemd/system/football-ai-relay.service
@@ -32,6 +33,8 @@ install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-wat
 install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-watchdog.timer" /etc/systemd/system/football-ai-watchdog.timer
 install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-backup.service" /etc/systemd/system/football-ai-backup.service
 install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-backup.timer" /etc/systemd/system/football-ai-backup.timer
+install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-trainer.service" /etc/systemd/system/football-ai-trainer.service
+install -o root -g root -m 0644 "${SOURCE_DIR}/collector/systemd/football-ai-trainer.timer" /etc/systemd/system/football-ai-trainer.timer
 
 if [[ ! -s "${CONFIG_DIR}/relay-secret" ]]; then
   umask 0077
@@ -46,8 +49,10 @@ systemctl start football-ai-collector.service
 systemctl enable --now football-ai-relay.service
 systemctl enable --now football-ai-watchdog.timer
 systemctl enable --now football-ai-backup.timer
+systemctl enable --now football-ai-trainer.timer
 systemctl start football-ai-watchdog.service || true
 systemctl start football-ai-backup.service
+systemctl start football-ai-trainer.service
 
 echo "Collector installed."
 systemctl --no-pager --full status football-ai-collector.service || true

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Football AI model training daily
+
+[Timer]
+OnCalendar=*-*-* 04:10:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

@@ -593,8 +593,12 @@ def fit_expected_goals(target: tuple[float, float, float]) -> tuple[float, float
     return best
 
 
-def score_model(probabilities: list[float]) -> dict[str, Any]:
+def score_model(
+    probabilities: list[float], home_goal_scale: float = 1.0, away_goal_scale: float = 1.0
+) -> dict[str, Any]:
     home_rate, away_rate = fit_expected_goals(tuple(value / 100 for value in probabilities))
+    home_rate = max(0.2, min(4.5, home_rate * home_goal_scale))
+    away_rate = max(0.2, min(4.5, away_rate * away_goal_scale))
     home_goals = poisson_probabilities(home_rate)
     away_goals = poisson_probabilities(away_rate)
     scores: list[tuple[int, int, float]] = []
@@ -966,6 +970,49 @@ def blend_fundamentals(base: dict[str, Any], fundamentals: dict[str, Any]) -> di
 SHADOW_MODEL_VERSION = "v3-shadow-calibrated"
 
 
+def active_trained_model(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    with contextlib.suppress(sqlite3.OperationalError, ValueError, TypeError):
+        row = connection.execute(
+            "SELECT version,payload FROM trained_models WHERE status='active' ORDER BY trained_at DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            payload = json.loads(row[1])
+            payload["version"] = row[0]
+            return payload
+    return None
+
+
+def apply_trained_model(analysis: dict[str, Any], model: dict[str, Any] | None) -> dict[str, Any]:
+    probabilities = analysis.get("probabilities")
+    if not model or not isinstance(probabilities, dict):
+        return analysis
+    parameters = model.get("parameters") or {}
+    temperature = max(0.5, min(2.0, float(parameters.get("temperature") or 1.0)))
+    keys = ("home", "draw", "away")
+    powered = [max(0.000001, float(probabilities[key]) / 100) ** (1 / temperature) for key in keys]
+    total = sum(powered)
+    values = [round(value / total * 100, 2) for value in powered]
+    values[-1] = round(100 - values[0] - values[1], 2)
+    labels = ["主胜", "平局", "客胜"]
+    ordered = sorted(values, reverse=True)
+    gap = ordered[0] - ordered[1]
+    return {
+        **analysis,
+        **score_model(
+            values,
+            max(0.8, min(1.2, float(parameters.get("homeGoalScale") or 1.0))),
+            max(0.8, min(1.2, float(parameters.get("awayGoalScale") or 1.0))),
+        ),
+        "modelVersion": str(model.get("version") or "v4-trained"),
+        "preTrainingProbabilities": probabilities,
+        "probabilities": dict(zip(keys, values)),
+        "prediction": labels[values.index(max(values))],
+        "confidence": round(max(values), 2),
+        "risk": "低风险" if gap >= 25 else "中风险" if gap >= 12 else "高风险",
+        "trainingSampleCount": int(model.get("sampleCount") or 0),
+    }
+
+
 def calibrated_candidate(base: dict[str, Any], primary: dict[str, Any]) -> dict[str, Any] | None:
     """Build a conservative challenger without changing the live recommendation."""
     market = base.get("probabilities")
@@ -999,17 +1046,19 @@ def apply_model_policy(
 ) -> None:
     candidate = calibrated_candidate(base, primary)
     if candidate is None:
-        item["analysis"] = primary
+        item["analysis"] = apply_trained_model(primary, active_trained_model(connection))
         item["modelCandidates"] = []
         return
     row = connection.execute(
         "SELECT value FROM collector_state WHERE key='active_model_version'"
     ).fetchone()
     if row and row[0] == SHADOW_MODEL_VERSION:
-        item["analysis"] = {**candidate, "candidateMode": "promoted"}
+        item["analysis"] = apply_trained_model(
+            {**candidate, "candidateMode": "promoted"}, active_trained_model(connection)
+        )
         item["modelCandidates"] = [primary]
     else:
-        item["analysis"] = primary
+        item["analysis"] = apply_trained_model(primary, active_trained_model(connection))
         item["modelCandidates"] = [candidate]
 
 
@@ -1237,6 +1286,36 @@ CREATE TABLE IF NOT EXISTS api_refresh_checkpoints (
 CREATE TABLE IF NOT EXISTS collector_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS training_samples (
+  match_id TEXT PRIMARY KEY,
+  features TEXT NOT NULL,
+  target_outcome INTEGER NOT NULL,
+  home_goals INTEGER NOT NULL,
+  away_goals INTEGER NOT NULL,
+  locked_at TEXT NOT NULL,
+  settled_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_training_samples_settled
+  ON training_samples(settled_at);
+CREATE TABLE IF NOT EXISTS trained_models (
+  version TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  trained_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trained_models_status_time
+  ON trained_models(status,trained_at);
+CREATE TABLE IF NOT EXISTS model_training_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  status TEXT NOT NULL,
+  sample_count INTEGER NOT NULL DEFAULT 0,
+  decision TEXT,
+  payload TEXT,
+  error TEXT
 );
 CREATE TABLE IF NOT EXISTS team_aliases (
   alias_key TEXT PRIMARY KEY,
@@ -2411,6 +2490,9 @@ def operations_summary(
     watchdog = None
     with contextlib.suppress(OSError, ValueError):
         watchdog = json.loads((data_dir / "watchdog.json").read_text(encoding="utf-8"))
+    training = None
+    with contextlib.suppress(OSError, ValueError):
+        training = json.loads((data_dir / "training-status.json").read_text(encoding="utf-8"))
     api_usage = api_football_usage_summary(connection)
     has_professional_data = any(
         (item.get("fundamentals") or {}).get("source") == "api_football" for item in matches
@@ -2450,6 +2532,7 @@ def operations_summary(
             "retentionDays": 30,
         },
         "watchdog": watchdog,
+        "training": training,
         "apiFootball": {
             **api_usage,
             "schedule": {

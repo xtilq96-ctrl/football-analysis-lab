@@ -8,6 +8,7 @@ export default async function EvaluationPage() {
   const recent7 = performance.recent7Days;
   const recent = performance.recent30;
   const governance = performance.modelGovernance;
+  const training = data.operations?.training;
   return <DashboardSectionShell active="/evaluation" title="模型评估" description="每场预测在截止时间锁定，完赛后自动核对胜平负、比分、总进球和概率质量；样本不足时不会据此升级模型。">
     <section className="rounded-2xl border border-lime-300/15 bg-lime-300/[.055] p-5 sm:p-6">
       <div className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="text-base font-medium">真实赛果验证</h2><p className="mt-1 text-sm text-white/45">累计结果与最近30场同时展示，防止历史平均掩盖近期退化。</p></div><span className="text-xs text-white/35">概率误差越低越好</span></div>
@@ -43,6 +44,7 @@ export default async function EvaluationPage() {
     </div>
 
     <div className="mt-4 grid gap-4 xl:grid-cols-2">
+      <SectionCard title="正式训练流水线">{training ? <><p className="text-sm leading-6 text-white/55">{training.message}</p><div className="mt-4 grid grid-cols-2 gap-3"><Metric label="训练样本" value={`${training.trainingCount}场`} /><Metric label="独立验证" value={`${training.validationCount}场`} /><Metric label="验证集Brier" value={score(training.candidate.brierScore)} /><Metric label="进球平均误差" value={training.candidate.goalMae.toFixed(3)} /></div><p className="mt-3 text-xs text-white/35">每天04:10自动训练；新模型未通过验证时不会替换现行模型。</p></> : <p className="text-sm text-white/45">等待服务器完成第一轮正式训练。</p>}</SectionCard>
       <SectionCard title="算法口径"><p className="text-sm leading-7 text-white/55">胜平负先由体彩固定奖去水，再用近期状态、主客场攻防和赛程做有限修正。比分与总进球来自和胜平负概率相匹配的泊松分布。</p><p className="mt-3 text-sm leading-7 text-white/55">Brier误差和对数损失用于衡量概率本身是否可靠，不只判断最高概率选项有没有猜中。</p></SectionCard>
       <SectionCard title="升级纪律"><p className="text-sm leading-7 text-white/55">当前数据只用于持续观察。达到足够样本后，候选模型必须同时通过命中率、概率校准和近期稳定性测试，才允许升级；否则继续保留现有模型。</p><p className="mt-3 text-xs text-white/35">历史表现不代表未来结果，系统不作收益承诺。</p></SectionCard>
     </div>

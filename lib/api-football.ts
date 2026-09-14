@@ -109,6 +109,14 @@ export type OperationsSummary = {
   analysis: { readyMatches: number; totalMatches: number; lockedMatches: number; nextFinalAnalysisAt: string | null };
   backup: { status: string; latestAt: string | null; retentionDays: number };
   watchdog?: { status: string; checkedAt: string; localDataAgeMinutes: number | null; mirrorAgeMinutes: number | null; autoRetry: boolean; errors: string[] } | null;
+  training?: {
+    status: 'ok' | 'collecting'; decision: 'collecting' | 'hold' | 'promote' | 'rollback'; message: string;
+    trainedAt: string; nextRunAt: string; sampleCount: number; trainingCount: number;
+    validationCount: number; candidateVersion: string; activeVersion: string | null;
+    baseline: { brierScore: number; logLoss: number; outcomeHitRate: number; goalMae: number };
+    candidate: { brierScore: number; logLoss: number; outcomeHitRate: number; goalMae: number };
+    gates: { enoughSamples: boolean; brierImproved: boolean; logLossStable: boolean; goalErrorStable: boolean };
+  } | null;
   apiFootball?: {
     quotaDate: string; used: number; localUsed: number; providerUsed: number | null;
     dailyLimit: number; operationalLimit: number; reserve: number; remaining: number;
