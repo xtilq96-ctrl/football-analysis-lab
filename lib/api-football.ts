@@ -34,6 +34,11 @@ type Fundamentals = {
   source?: 'sporttery_history' | 'api_football';
   sourceLabel?: string;
   mappingConfidence?: number;
+  mappingDiagnostic?: {
+    status: 'matched' | 'date_unavailable' | 'team_name_mismatch' | 'time_or_coverage_mismatch';
+    reason: string;
+    confidence: number;
+  };
   message?: string;
   home?: TeamFundamentals;
   away?: TeamFundamentals;
@@ -116,6 +121,11 @@ export type OperationsSummary = {
   professionalData?: {
     matchedMatches: number; injuryAvailableMatches: number;
     confirmedLineupMatches: number; totalMatches: number;
+    aliasCount?: number;
+    mappingDiagnostics?: {
+      matched: number; date_unavailable: number;
+      team_name_mismatch: number; time_or_coverage_mismatch: number;
+    };
   };
   dataProvider: { sporttery: string; professionalFundamentals: string; message: string };
 };

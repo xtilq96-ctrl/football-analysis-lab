@@ -659,6 +659,39 @@ def compact_name(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", normalized.lower())
 
 
+def alias_key(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).lower()
+    return re.sub(r"[^\w]+", "", normalized, flags=re.UNICODE)
+
+
+TEAM_ALIAS_SEEDS = {
+    "科莫": "Como", "帕尔马": "Parma", "都灵": "Torino", "罗马": "AS Roma",
+    "佐加顿斯": "Djurgardens IF", "哥德堡盖斯": "GAIS", "博德闪耀": "Bodo/Glimt",
+    "桑纳菲尤尔": "Sandefjord", "吉达国民": "Al-Ahli Jeddah", "棉农": "Pakhtakor",
+    "国际米兰": "Inter", "乌迪内斯": "Udinese", "圣旺红星": "Red Star",
+    "梅斯": "Metz", "利兹联": "Leeds", "纽卡斯尔联": "Newcastle",
+    "比利亚雷亚尔": "Villarreal", "皇家贝蒂斯": "Real Betis",
+    "布拉加": "SC Braga", "埃斯托里尔": "Estoril",
+}
+
+
+def load_team_aliases(connection: sqlite3.Connection) -> dict[str, list[str]]:
+    aliases: dict[str, list[str]] = {}
+    for key, api_name in connection.execute(
+        "SELECT alias_key,api_name FROM team_aliases ORDER BY confidence DESC"
+    ).fetchall():
+        aliases.setdefault(str(key), []).append(str(api_name))
+    return aliases
+
+
+def expanded_team_hints(hints: Iterable[Any], aliases: dict[str, list[str]] | None) -> list[Any]:
+    expanded = list(hints)
+    if aliases:
+        for hint in list(expanded):
+            expanded.extend(aliases.get(alias_key(hint), []))
+    return expanded
+
+
 def name_acronym(value: Any) -> str:
     words = re.findall(r"[a-z0-9]+", unicodedata.normalize("NFKD", str(value or "")).lower())
     return "".join(word[0] for word in words if word and word not in {"fc", "cf", "sc", "club"})
@@ -682,12 +715,20 @@ def team_name_similarity(hints: Iterable[Any], api_name: Any) -> float:
     return best
 
 
-def match_api_fixture(match: dict[str, Any], fixtures: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, float]:
+def match_api_fixture(
+    match: dict[str, Any],
+    fixtures: list[dict[str, Any]],
+    aliases: dict[str, list[str]] | None = None,
+) -> tuple[dict[str, Any] | None, float]:
     kickoff = parse_kickoff(match)
     if kickoff is None:
         return None, 0.0
-    home_hints = (match.get("homeTeamCode"), match.get("homeTeamEn"), match.get("home"))
-    away_hints = (match.get("awayTeamCode"), match.get("awayTeamEn"), match.get("away"))
+    home_hints = expanded_team_hints(
+        (match.get("homeTeamCode"), match.get("homeTeamEn"), match.get("home")), aliases
+    )
+    away_hints = expanded_team_hints(
+        (match.get("awayTeamCode"), match.get("awayTeamEn"), match.get("away")), aliases
+    )
     best_fixture: dict[str, Any] | None = None
     best_score = 0.0
     for fixture in fixtures:
@@ -707,6 +748,66 @@ def match_api_fixture(match: dict[str, Any], fixtures: list[dict[str, Any]]) -> 
         if score > best_score:
             best_fixture, best_score = fixture, score
     return (best_fixture, round(best_score, 3)) if best_score >= 0.72 else (None, round(best_score, 3))
+
+
+def fixture_mapping_diagnostic(
+    match: dict[str, Any], fixtures: list[dict[str, Any]], confidence: float, matched: bool
+) -> dict[str, Any]:
+    if matched:
+        return {"status": "matched", "reason": "比赛、时间和球队均已匹配", "confidence": confidence}
+    if not fixtures:
+        return {
+            "status": "date_unavailable",
+            "reason": "该开赛日期的专业赛程不可用，可能受免费套餐或赛事覆盖限制",
+            "confidence": confidence,
+        }
+    kickoff = parse_kickoff(match)
+    has_time_candidate = False
+    if kickoff:
+        for fixture in fixtures:
+            timestamp = (fixture.get("fixture") or {}).get("timestamp")
+            with contextlib.suppress(TypeError, ValueError, OSError):
+                api_kickoff = datetime.fromtimestamp(int(timestamp), timezone.utc).astimezone(SHANGHAI)
+                if abs((api_kickoff - kickoff).total_seconds()) <= 20 * 60:
+                    has_time_candidate = True
+                    break
+    return {
+        "status": "team_name_mismatch" if has_time_candidate else "time_or_coverage_mismatch",
+        "reason": "开赛时间接近，但球队名称尚未安全对应" if has_time_candidate else "专业源没有找到时间相符的比赛",
+        "confidence": confidence,
+    }
+
+
+def learn_team_aliases(
+    connection: sqlite3.Connection,
+    match: dict[str, Any],
+    fixture: dict[str, Any],
+    confidence: float,
+    updated_at: str,
+) -> None:
+    if confidence < 0.86:
+        return
+    teams = fixture.get("teams") or {}
+    pairs = (
+        ((match.get("home"), match.get("homeTeamEn"), match.get("homeTeamCode")), (teams.get("home") or {}).get("name")),
+        ((match.get("away"), match.get("awayTeamEn"), match.get("awayTeamCode")), (teams.get("away") or {}).get("name")),
+    )
+    with connection:
+        for hints, api_name in pairs:
+            if not api_name:
+                continue
+            for hint in hints:
+                key = alias_key(hint)
+                if not key:
+                    continue
+                connection.execute(
+                    """INSERT INTO team_aliases(alias_key,alias_text,api_name,source,confidence,updated_at)
+                       VALUES (?,?,?,?,?,?) ON CONFLICT(alias_key) DO UPDATE SET
+                       api_name=excluded.api_name,source=excluded.source,
+                       confidence=excluded.confidence,updated_at=excluded.updated_at
+                       WHERE excluded.confidence >= team_aliases.confidence""",
+                    (key, str(hint), str(api_name), "automatic", confidence, updated_at),
+                )
 
 
 def team_form_summary(fixtures: list[dict[str, Any]], team_id: int, venue: str, kickoff: datetime) -> dict[str, Any]:
@@ -1137,6 +1238,16 @@ CREATE TABLE IF NOT EXISTS collector_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS team_aliases (
+  alias_key TEXT PRIMARY KEY,
+  alias_text TEXT NOT NULL,
+  api_name TEXT NOT NULL,
+  source TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_team_aliases_api_name
+  ON team_aliases(api_name);
 CREATE TABLE IF NOT EXISTS official_match_history (
   match_id TEXT PRIMARY KEY,
   match_date TEXT NOT NULL,
@@ -1224,7 +1335,17 @@ def connect_database(path: Path) -> sqlite3.Connection:
     columns = {row[1] for row in connection.execute("PRAGMA table_info(prediction_settlements)")}
     if "evaluation_payload" not in columns:
         connection.execute("ALTER TABLE prediction_settlements ADD COLUMN evaluation_payload TEXT")
-        connection.commit()
+    seeded_at = now_shanghai().isoformat(timespec="seconds")
+    connection.executemany(
+        """INSERT OR IGNORE INTO team_aliases
+           (alias_key,alias_text,api_name,source,confidence,updated_at)
+           VALUES (?,?,?,?,?,?)""",
+        [
+            (alias_key(alias), alias, api_name, "seed", 1.0, seeded_at)
+            for alias, api_name in TEAM_ALIAS_SEEDS.items()
+        ],
+    )
+    connection.commit()
     return connection
 
 
@@ -1566,11 +1687,18 @@ def enrich_fundamentals(
     if dates and len(fixture_errors) == len(dates):
         raise fixture_errors[0]
 
+    aliases = load_team_aliases(connection)
     mapped: dict[str, tuple[dict[str, Any], float]] = {}
+    mapping_diagnostics: dict[str, dict[str, Any]] = {}
     for match_id, item in normalized_by_id.items():
-        fixture, confidence = match_api_fixture(item, fixtures_by_date.get(item["kickoffDate"], []))
+        fixtures = fixtures_by_date.get(item["kickoffDate"], [])
+        fixture, confidence = match_api_fixture(item, fixtures, aliases)
+        mapping_diagnostics[match_id] = fixture_mapping_diagnostic(
+            item, fixtures, confidence, fixture is not None
+        )
         if fixture:
             mapped[match_id] = (fixture, confidence)
+            learn_team_aliases(connection, item, fixture, confidence, collected_at)
 
     histories: dict[int, list[dict[str, Any]]] = {}
     history_enabled = os.environ.get("API_FOOTBALL_HISTORY_ENABLED", "").lower() in {"1", "true", "yes"}
@@ -1647,6 +1775,7 @@ def enrich_fundamentals(
             mapping = mapped.get(match_id)
             if not mapping:
                 fundamentals = official_history_fundamentals(connection, item, collected_at)
+                fundamentals["mappingDiagnostic"] = mapping_diagnostics[match_id]
                 primary_analysis = blend_fundamentals(base_analysis, fundamentals)
                 apply_model_policy(connection, item, base_analysis, primary_analysis)
                 item["fundamentals"] = fundamentals
@@ -1701,6 +1830,7 @@ def enrich_fundamentals(
                     "source": "api_football",
                     "sourceLabel": "API-Football 专业比赛数据",
                     "mappingConfidence": confidence,
+                    "mappingDiagnostic": mapping_diagnostics[match_id],
                     "fixtureId": fixture_id,
                     "dataUpdatedAt": collected_at,
                     "home": {
@@ -1735,6 +1865,8 @@ def enrich_fundamentals(
                 item["analysis"] = frozen.get("analysis", item["analysis"])
                 item["fundamentals"] = frozen.get("fundamentals", item.get("fundamentals"))
                 item["modelCandidates"] = frozen.get("modelCandidates", [])
+                if item.get("fundamentals") is not None:
+                    item["fundamentals"]["mappingDiagnostic"] = mapping_diagnostics[match_id]
             elif schedule["isLocked"]:
                 frozen = {
                     "analysis": item["analysis"], "fundamentals": item.get("fundamentals"),
@@ -2296,6 +2428,17 @@ def operations_summary(
         if (((item.get("fundamentals") or {}).get("home") or {}).get("lineup") or {}).get("confirmed")
         and (((item.get("fundamentals") or {}).get("away") or {}).get("lineup") or {}).get("confirmed")
     )
+    alias_count = int(connection.execute("SELECT COUNT(*) FROM team_aliases").fetchone()[0])
+    diagnostic_counts = {
+        "matched": 0, "date_unavailable": 0,
+        "team_name_mismatch": 0, "time_or_coverage_mismatch": 0,
+    }
+    for item in matches:
+        status = str(
+            (((item.get("fundamentals") or {}).get("mappingDiagnostic") or {}).get("status") or "")
+        )
+        if status in diagnostic_counts:
+            diagnostic_counts[status] += 1
     return {
         "collector": {"status": "ok", "intervalMinutes": 5, "staleAfterMinutes": 15, "updatedAt": collected_at},
         "analysis": {
@@ -2319,6 +2462,8 @@ def operations_summary(
             "matchedMatches": professional_matched,
             "injuryAvailableMatches": injury_available,
             "confirmedLineupMatches": lineup_confirmed,
+            "aliasCount": alias_count,
+            "mappingDiagnostics": diagnostic_counts,
             "totalMatches": len(matches),
         },
         "dataProvider": {

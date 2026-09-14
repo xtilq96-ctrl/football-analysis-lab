@@ -13,6 +13,7 @@ export default async function SystemPage() {
   const backupAt = operations?.backup.latestAt ? formatTime(operations.backup.latestAt) : '首次备份执行中';
   const apiUsage = operations?.apiFootball;
   const professional = operations?.professionalData;
+  const mappingDiagnostics = professional?.mappingDiagnostics;
   const lineupBlock = apiUsage?.featureBlocks?.['临场首发'];
   const lineupStatus = lineupBlock
     ? '套餐限制，已暂停查询'
@@ -45,7 +46,7 @@ export default async function SystemPage() {
       <SectionCard title="同步与自动恢复"><Rows rows={[["本地数据延迟", watchdog?.localDataAgeMinutes == null ? "等待首轮检查" : `${watchdog.localDataAgeMinutes}分钟`],["网站快照延迟", watchdog?.mirrorAgeMinutes == null ? "等待首轮检查" : `${watchdog.mirrorAgeMinutes}分钟`],["超时标准", `${operations?.collector.staleAfterMinutes ?? 15}分钟`],["自动重试", watchdog?.autoRetry === false ? "关闭" : "已开启"]]} /></SectionCard>
       <SectionCard title="分析时限"><Rows rows={[["分析已生成", `${operations?.analysis.readyMatches ?? data.matches.length}/${operations?.analysis.totalMatches ?? data.matches.length}场`],["已经锁定", `${operations?.analysis.lockedMatches ?? 0}场`],["下一次最终分析", nextAnalysis],["锁定规则", "开赛前60分钟或21:00"]]} /></SectionCard>
       <SectionCard title="球队历史基本面"><Rows rows={[["已生成", `${historyReady}/${data.matches.length}场`],["历史范围", "近120天体彩官方赛果"],["完整回填", "每天1次"],["增量更新", "每5分钟"]]} /></SectionCard>
-      <SectionCard title="专业数据覆盖"><Rows rows={[["比赛匹配", `${professional?.matchedMatches ?? 0}/${professional?.totalMatches ?? data.matches.length}场`],["伤停停赛", `${professional?.injuryAvailableMatches ?? 0}/${professional?.totalMatches ?? data.matches.length}场已取得`],["正式首发", `${professional?.confirmedLineupMatches ?? lineups}/${professional?.totalMatches ?? data.matches.length}场已确认`],["缺失处理", "不猜测、不修正"]]} /></SectionCard>
+      <SectionCard title="专业数据覆盖"><Rows rows={[["比赛匹配", `${professional?.matchedMatches ?? 0}/${professional?.totalMatches ?? data.matches.length}场`],["球队别名库", `${professional?.aliasCount ?? 0}条`],["赛程源受限", `${mappingDiagnostics?.date_unavailable ?? 0}场`],["队名待匹配", `${mappingDiagnostics?.team_name_mismatch ?? 0}场`],["时间或覆盖不符", `${mappingDiagnostics?.time_or_coverage_mismatch ?? 0}场`],["伤停停赛", `${professional?.injuryAvailableMatches ?? 0}/${professional?.totalMatches ?? data.matches.length}场已取得`],["正式首发", `${professional?.confirmedLineupMatches ?? lineups}/${professional?.totalMatches ?? data.matches.length}场已确认`],["缺失处理", "明确原因，不猜测"]]} /></SectionCard>
       <SectionCard title="临场首发状态"><Rows rows={[["当前状态", lineupStatus],["限制原因", lineupBlock?.reason ?? "暂无套餐限制"],["再次尝试", lineupBlock ? formatTime(lineupBlock.expiresAt) : "按赛前节点自动检查"],["查询方式", "逐场查询，拒绝后自动暂停"]]} /></SectionCard>
       <SectionCard title="分时刷新调度"><Rows rows={[["赛程匹配", apiUsage?.schedule.fixtures ?? "每6小时按日期批量刷新"],["伤停停赛", apiUsage?.schedule.injuries ?? "每4小时按日期批量刷新"],["临场首发", apiUsage?.schedule.lineups ?? "赛前180/90/45/20分钟"],["已确认首发", "停止重复查询"]]} /></SectionCard>
       <SectionCard title="今日接口明细"><Rows rows={apiUsage && Object.keys(apiUsage.byPurpose).length ? Object.entries(apiUsage.byPurpose).map(([label, value]) => [label, `${value}次`]) : [["状态", "今日尚无真实调用"],["计数规则", "只计算实际访问接口"]]} /></SectionCard>

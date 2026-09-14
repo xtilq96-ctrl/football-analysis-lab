@@ -261,6 +261,33 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(summary["wins"], 3)
         self.assertEqual(summary["cleanSheetRate"], 60.0)
 
+    def test_seeded_chinese_aliases_match_api_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = collector.connect_database(Path(directory) / "test.sqlite3")
+            match = {
+                "kickoffDate": "2026-09-15", "kickoffTime": "00:30:00",
+                "home": "科莫", "away": "帕尔马",
+                "homeTeamCode": "", "awayTeamCode": "",
+                "homeTeamEn": "", "awayTeamEn": "",
+            }
+            kickoff = collector.parse_kickoff(match)
+            fixture = {
+                "fixture": {"id": 101, "timestamp": int(kickoff.timestamp())},
+                "teams": {"home": {"name": "Como"}, "away": {"name": "Parma"}},
+            }
+            selected, confidence = collector.match_api_fixture(
+                match, [fixture], collector.load_team_aliases(connection)
+            )
+            self.assertEqual(selected["fixture"]["id"], 101)
+            self.assertEqual(confidence, 1.0)
+            connection.close()
+
+    def test_empty_fixture_day_is_reported_as_source_unavailable(self):
+        match = {"kickoffDate": "2026-09-15", "kickoffTime": "00:30:00"}
+        diagnostic = collector.fixture_mapping_diagnostic(match, [], 0.0, False)
+        self.assertEqual(diagnostic["status"], "date_unavailable")
+        self.assertIn("专业赛程不可用", diagnostic["reason"])
+
     def test_fundamentals_adjust_market_probability(self):
         base = collector.market_analysis(collector.flatten_matches(SAMPLE)[0])
         fundamentals = {
