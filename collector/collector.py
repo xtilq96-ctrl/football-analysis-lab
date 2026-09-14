@@ -1062,6 +1062,87 @@ def apply_model_policy(
         item["modelCandidates"] = [candidate]
 
 
+def prediction_data_quality(item: dict[str, Any]) -> dict[str, Any]:
+    """Score source completeness without changing the model's event probabilities."""
+    score = 0.0
+    available: list[str] = []
+    missing: list[str] = []
+    had = item.get("had") or {}
+    hhad = item.get("hhad") or {}
+    fundamentals = item.get("fundamentals") or {}
+    home = fundamentals.get("home") or {}
+    away = fundamentals.get("away") or {}
+
+    if all(decimal_odds(had.get(key)) is not None for key in ("h", "d", "a")):
+        score += 35
+        available.append("体彩胜平负固定奖")
+    else:
+        missing.append("完整胜平负固定奖")
+    if all(decimal_odds(hhad.get(key)) is not None for key in ("h", "d", "a")):
+        score += 10
+        available.append("体彩让球固定奖")
+    else:
+        missing.append("完整让球固定奖")
+
+    history_points = 0.0
+    for team in (home, away):
+        matches = int(((team.get("form") or {}).get("matches") or 0))
+        history_points += min(10.0, matches * 2.0)
+    score += history_points
+    if history_points >= 20:
+        available.append("双方近期与主客场历史")
+    else:
+        missing.append("双方至少5场历史")
+
+    diagnostic = fundamentals.get("mappingDiagnostic") or {}
+    if fundamentals.get("fixtureId") or diagnostic.get("status") == "matched":
+        score += 10
+        available.append("专业比赛匹配")
+    else:
+        missing.append("专业比赛匹配")
+
+    absence_ready = all(
+        ((team.get("absences") or {}).get("available") is True) for team in (home, away)
+    )
+    if absence_ready:
+        score += 15
+        available.append("双方伤停停赛")
+    else:
+        missing.append("双方伤停停赛")
+
+    lineup_ready = all(
+        bool((team.get("lineup") or {}).get("confirmed")) for team in (home, away)
+    )
+    if lineup_ready:
+        score += 10
+        available.append("双方确认首发")
+    else:
+        missing.append("双方确认首发")
+
+    rounded_score = int(round(min(100.0, score)))
+    if rounded_score >= 90:
+        grade, label = "A", "高可信"
+    elif rounded_score >= 75:
+        grade, label = "B", "较可信"
+    elif rounded_score >= 55:
+        grade, label = "C", "谨慎参考"
+    else:
+        grade, label = "D", "数据不足"
+    raw_confidence = float((item.get("analysis") or {}).get("confidence") or 0)
+    reliability_factor = 0.60 + rounded_score / 100 * 0.40
+    adjusted_confidence = round(raw_confidence * reliability_factor, 2) if raw_confidence else None
+    return {
+        "score": rounded_score,
+        "grade": grade,
+        "label": label,
+        "adjustedConfidence": adjusted_confidence,
+        "available": available,
+        "missing": missing,
+        "recommendationEligible": rounded_score >= 55,
+        "methodVersion": "data-quality-v1",
+    }
+
+
 def build_recommendations(
     matches: list[dict[str, Any]],
     business_dates: list[str],
@@ -1080,6 +1161,9 @@ def build_recommendations(
             analysis = item.get("analysis") or {}
             prediction = analysis.get("prediction")
             confidence = float(analysis.get("confidence") or 0)
+            data_quality = analysis.get("dataQuality") or prediction_data_quality(item)
+            reliability_score = int(data_quality.get("score") or 0)
+            decision_confidence = float(data_quality.get("adjustedConfidence") or 0)
             price = decimal_odds((item.get("had") or {}).get(pick_key.get(prediction)))
             probabilities = analysis.get("probabilities") or {}
             market_probabilities = analysis.get("marketProbabilities") or probabilities
@@ -1089,7 +1173,8 @@ def build_recommendations(
             value_index = confidence / 100 * price if price is not None else 0
             risk = str(analysis.get("risk") or "待评估")
             if (
-                prediction not in pick_key or confidence < 45 or price is None
+                prediction not in pick_key or decision_confidence < 45 or price is None
+                or reliability_score < 55
                 or risk == "高风险" or edge < 1 or value_index < 1.01
             ):
                 continue
@@ -1101,17 +1186,20 @@ def build_recommendations(
                 "away": item["away"],
                 "pick": prediction,
                 "probability": confidence,
+                "decisionConfidence": decision_confidence,
+                "dataQualityScore": reliability_score,
+                "dataQualityGrade": str(data_quality.get("grade") or "D"),
                 "odds": price,
                 "edge": round(edge, 2),
                 "valueIndex": round(value_index, 3),
                 "risk": risk,
                 "isLocked": bool((item.get("analysisSchedule") or {}).get("isLocked")),
-                "quality": confidence + max(-3.0, min(8.0, edge)) - float(analysis.get("marketMargin") or 0) * 0.35,
+                "quality": decision_confidence + reliability_score * 0.10 + max(-3.0, min(8.0, edge)) - float(analysis.get("marketMargin") or 0) * 0.35,
             })
         candidates.sort(key=lambda item: (item["quality"], item["probability"]), reverse=True)
 
-        strong = [item for item in candidates if item["probability"] >= 54]
-        solid = [item for item in candidates if item["probability"] >= 50]
+        strong = [item for item in candidates if item["decisionConfidence"] >= 54 and item["dataQualityScore"] >= 70]
+        solid = [item for item in candidates if item["decisionConfidence"] >= 50 and item["dataQualityScore"] >= 55]
         leg_count = 0
         threshold = 0.0
         if len(strong) >= 4:
@@ -1132,7 +1220,7 @@ def build_recommendations(
             decisions[business_date] = {
                 "status": "no_pick", "legCount": 0, "candidateCount": len(candidates),
                 "reason": "可用场次、单场概率或组合概率未同时达到安全门槛，系统今日不强行推荐。",
-                "rulesVersion": "dynamic-combo-v1",
+                "rulesVersion": "dynamic-combo-v2-quality-gated",
             }
             continue
 
@@ -1186,7 +1274,7 @@ def build_recommendations(
                 f"系统综合单场概率、风险、概率优势和联赛相关性，自动选择{leg_count}串1。"
                 if selected else "候选场次存在相关性集中或组合概率不足，系统今日不推荐。"
             ),
-            "rulesVersion": "dynamic-combo-v1",
+            "rulesVersion": "dynamic-combo-v2-quality-gated",
         }
     return result, decisions
 
@@ -2510,6 +2598,15 @@ def operations_summary(
         if (((item.get("fundamentals") or {}).get("home") or {}).get("lineup") or {}).get("confirmed")
         and (((item.get("fundamentals") or {}).get("away") or {}).get("lineup") or {}).get("confirmed")
     )
+    quality_scores = [
+        int(((item.get("analysis") or {}).get("dataQuality") or {}).get("score") or 0)
+        for item in matches
+    ]
+    quality_grades = {grade: 0 for grade in ("A", "B", "C", "D")}
+    for item in matches:
+        grade = str(((item.get("analysis") or {}).get("dataQuality") or {}).get("grade") or "D")
+        if grade in quality_grades:
+            quality_grades[grade] += 1
     alias_count = int(connection.execute("SELECT COUNT(*) FROM team_aliases").fetchone()[0])
     diagnostic_counts = {
         "matched": 0, "date_unavailable": 0,
@@ -2549,6 +2646,12 @@ def operations_summary(
             "mappingDiagnostics": diagnostic_counts,
             "totalMatches": len(matches),
         },
+        "dataQuality": {
+            "averageScore": round(sum(quality_scores) / len(quality_scores), 1) if quality_scores else 0,
+            "eligibleMatches": sum(score >= 55 for score in quality_scores),
+            "grades": quality_grades,
+            "methodVersion": "data-quality-v1",
+        },
         "dataProvider": {
             "sporttery": "ok", "professionalFundamentals": "ok" if has_professional_data else "pending",
             "message": "专业数据已接入并受每日额度保护" if has_professional_data else "专业数据等待首次成功匹配",
@@ -2573,6 +2676,7 @@ def export_current(
     ).fetchall()
     matches = [json.loads(row[0]) for row in rows]
     for item in matches:
+        item.setdefault("analysis", {})["dataQuality"] = prediction_data_quality(item)
         result = connection.execute(
             """SELECT full_time_score,half_time_score,actual_outcome,settled_at
                FROM match_results WHERE match_id=?""",

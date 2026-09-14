@@ -122,6 +122,38 @@ class CollectorTests(unittest.TestCase):
             legs = recommendations["2026-09-08"][0]["legs"]
             self.assertNotEqual(legs[0]["matchId"], legs[1]["matchId"])
 
+    def test_data_quality_downgrades_confidence_without_changing_probabilities(self):
+        item = collector.normalized(
+            collector.flatten_matches(SAMPLE)[0], "2026-09-08T08:00:00+00:00"
+        )
+        original = dict(item["analysis"]["probabilities"])
+        quality = collector.prediction_data_quality(item)
+        self.assertEqual(quality["score"], 45)
+        self.assertEqual(quality["grade"], "D")
+        self.assertFalse(quality["recommendationEligible"])
+        self.assertLess(quality["adjustedConfidence"], item["analysis"]["confidence"])
+        self.assertEqual(item["analysis"]["probabilities"], original)
+
+    def test_complete_professional_data_reaches_a_grade(self):
+        item = collector.normalized(
+            collector.flatten_matches(SAMPLE)[0], "2026-09-08T08:00:00+00:00"
+        )
+        team = {
+            "form": {"matches": 5},
+            "absences": {"available": True},
+            "lineup": {"confirmed": True},
+        }
+        item["fundamentals"] = {
+            "fixtureId": 99,
+            "mappingDiagnostic": {"status": "matched"},
+            "home": team,
+            "away": team,
+        }
+        quality = collector.prediction_data_quality(item)
+        self.assertEqual(quality["score"], 100)
+        self.assertEqual(quality["grade"], "A")
+        self.assertEqual(quality["adjustedConfidence"], item["analysis"]["confidence"])
+
     def test_settles_predictions_against_official_full_time_score(self):
         with tempfile.TemporaryDirectory() as directory:
             connection = collector.connect_database(Path(directory) / "test.sqlite3")

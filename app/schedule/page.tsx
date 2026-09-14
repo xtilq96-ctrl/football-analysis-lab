@@ -13,8 +13,10 @@ export default async function SchedulePage() {
         </div>
         <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_1.3fr] lg:items-center">
           <div><p className="text-lg font-semibold">{match.home} <span className="mx-2 text-sm font-normal text-white/25">vs</span> {match.away}</p><p className="mt-1 text-sm text-white/40">体彩胜平负：{match.averageOdds?.join(' / ') ?? '待公布'} · {match.handicapLine ? `让球 ${match.handicapLine}` : '让球待公布'}</p></div>
-          <div className="grid grid-cols-4 gap-2 text-center text-sm"><Value label="推荐" value={match.probabilities ? ['主胜','平局','客胜'][match.probabilities.indexOf(Math.max(...match.probabilities))] : '等待'} /><Value label="比分" value={match.predictedScore ?? '—'} /><Value label="总进球" value={match.predictedTotalGoals ? `${match.predictedTotalGoals}球` : '—'} /><Value label="置信度" value={match.confidence === null ? '—' : `${match.confidence}%`} /></div>
+          <div className="grid grid-cols-2 gap-2 text-center text-sm sm:grid-cols-5"><Value label="推荐" value={match.probabilities ? ['主胜','平局','客胜'][match.probabilities.indexOf(Math.max(...match.probabilities))] : '等待'} /><Value label="首选比分" value={match.predictedScore ?? '—'} /><Value label="总进球" value={match.predictedTotalGoals ? `${match.predictedTotalGoals}球` : '—'} /><Value label="最高概率" value={match.confidence === null ? '—' : `${match.confidence}%`} /><Value label="预测可信度" value={match.dataQuality ? `${match.dataQuality.adjustedConfidence ?? '—'}% · ${match.dataQuality.grade}` : '评估中'} /></div>
         </div>
+        {match.scoreProbabilities.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-2 text-xs"><span className="text-white/35">比分前三候选</span>{match.scoreProbabilities.slice(0, 3).map((score, index) => <Badge key={score.score} variant="outline" className={index === 0 ? 'border-violet-300/25 bg-violet-300/10 text-violet-100' : 'border-white/10 text-white/55'}>{index + 1}. {score.score} · {score.probability}%</Badge>)}</div>}
+        <DataQualityStatus quality={match.dataQuality} />
         <MappingStatus diagnostic={match.fundamentals?.mappingDiagnostic} confidence={match.fundamentals?.mappingConfidence} />
         <p className="mt-4 border-t border-white/7 pt-3 text-sm leading-6 text-white/45">{match.note}</p>
       </article>)}
@@ -22,6 +24,15 @@ export default async function SchedulePage() {
     </div>
     <p className="mt-5 text-sm text-white/40"><a href="/" className="text-lime-300 hover:underline">返回今日分析</a></p>
   </DashboardSectionShell>;
+}
+
+function DataQualityStatus({ quality }: { quality: import('@/lib/api-football').DataQuality | null }) {
+  if (!quality) return <p className="mt-3 text-xs text-white/35">数据完整度：等待下一次服务器同步</p>;
+  const tone = quality.grade === 'A' ? 'text-emerald-200' : quality.grade === 'B' ? 'text-lime-200' : quality.grade === 'C' ? 'text-amber-200' : 'text-orange-200';
+  return <div className="mt-3 rounded-xl border border-white/7 bg-black/10 px-3 py-2 text-xs">
+    <div className="flex flex-wrap items-center justify-between gap-2"><span className={tone}>数据完整度 {quality.score}/100 · {quality.grade}级 {quality.label}</span><span className="text-white/35">缺失时自动收紧组合推荐</span></div>
+    {quality.missing.length > 0 && <p className="mt-1 text-white/35">待补：{quality.missing.join('、')}</p>}
+  </div>;
 }
 
 function MappingStatus({ diagnostic, confidence }: {

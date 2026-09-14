@@ -14,6 +14,17 @@ type ModelAnalysis = {
   under25Probability?: number;
   over25Probability?: number;
   expectedGoals?: { home: number; away: number; total: number };
+  dataQuality?: DataQuality;
+};
+export type DataQuality = {
+  score: number;
+  grade: 'A' | 'B' | 'C' | 'D';
+  label: string;
+  adjustedConfidence: number | null;
+  available: string[];
+  missing: string[];
+  recommendationEligible: boolean;
+  methodVersion: string;
 };
 type TeamForm = {
   matches: number; wins: number; draws: number; losses: number;
@@ -135,6 +146,11 @@ export type OperationsSummary = {
       team_name_mismatch: number; time_or_coverage_mismatch: number;
     };
   };
+  dataQuality?: {
+    averageScore: number; eligibleMatches: number;
+    grades: Record<'A' | 'B' | 'C' | 'D', number>;
+    methodVersion: string;
+  };
   dataProvider: { sporttery: string; professionalFundamentals: string; message: string };
 };
 type SportteryMatch = {
@@ -194,6 +210,9 @@ export type DashboardRecommendation = {
     away: string;
     pick: string;
     probability: number;
+    decisionConfidence?: number;
+    dataQualityScore?: number;
+    dataQualityGrade?: string;
     odds: number;
   }>;
 };
@@ -277,6 +296,7 @@ export type DashboardMatch = {
   over25Probability: number | null;
   under25Probability: number | null;
   expectedGoals: { home: number; away: number; total: number } | null;
+  dataQuality: DataQuality | null;
   fundamentals: Fundamentals | null;
   analysisSchedule: AnalysisSchedule | null;
   result: MatchResult | null;
@@ -596,6 +616,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         over25Probability: item.analysis?.over25Probability ?? null,
         under25Probability: item.analysis?.under25Probability ?? null,
         expectedGoals: item.analysis?.expectedGoals ?? null,
+        dataQuality: item.analysis?.dataQuality ?? null,
         fundamentals: item.fundamentals ?? null,
         analysisSchedule: item.analysisSchedule ?? null,
         result: item.result ?? null,
