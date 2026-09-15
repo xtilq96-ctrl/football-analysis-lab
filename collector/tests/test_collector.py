@@ -214,7 +214,27 @@ class CollectorTests(unittest.TestCase):
         schedule = collector.analysis_schedule(match, now)
         self.assertTrue(schedule["isEarlyMatch"])
         self.assertEqual(schedule["phase"], "最终分析")
-        self.assertEqual(schedule["finalAnalysisAt"][11:16], "17:00")
+        self.assertEqual(schedule["finalAnalysisAt"][11:16], "18:10")
+        self.assertEqual(schedule["lockAt"][11:16], "18:20")
+
+    def test_late_match_is_locked_before_sporttery_sales_close(self):
+        match = {
+            "businessDate": "2026-09-08",
+            "kickoffDate": "2026-09-09",
+            "kickoffTime": "02:00:00",
+        }
+        schedule = collector.analysis_schedule(
+            match, collector.datetime(2026, 9, 8, 21, 31, tzinfo=collector.SHANGHAI)
+        )
+        self.assertEqual(schedule["finalAnalysisAt"][11:16], "21:15")
+        self.assertEqual(schedule["lockAt"][11:16], "21:30")
+        self.assertTrue(schedule["isLocked"])
+
+    def test_injury_refresh_targets_ticketing_checkpoints(self):
+        ttl = collector.injury_refresh_ttl(
+            "2026-09-08", collector.datetime(2026, 9, 8, 14, 0, tzinfo=collector.SHANGHAI)
+        )
+        self.assertEqual(ttl, collector.timedelta(hours=1))
 
     def test_api_usage_manager_reserves_fifteen_requests(self):
         with tempfile.TemporaryDirectory() as directory:

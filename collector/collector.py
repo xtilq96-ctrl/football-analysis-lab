@@ -451,7 +451,7 @@ def parse_kickoff(match: dict[str, Any]) -> datetime | None:
 
 
 def analysis_schedule(match: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
-    """Create an early-match aware finalization and lock schedule in China time."""
+    """Finalize before kickoff and always respect the China Sporttery sales cutoff."""
     current = now or now_shanghai()
     kickoff = parse_kickoff(match)
     business_date_text = str(match.get("businessDate") or "")
@@ -459,16 +459,16 @@ def analysis_schedule(match: dict[str, Any], now: datetime | None = None) -> dic
         business_date = datetime.fromisoformat(business_date_text).replace(tzinfo=SHANGHAI)
     except ValueError:
         business_date = current.replace(hour=0, minute=0, second=0, microsecond=0)
-    global_final = business_date.replace(hour=20, minute=50)
-    global_lock = business_date.replace(hour=21, minute=0)
+    global_final = business_date.replace(hour=21, minute=15)
+    global_lock = business_date.replace(hour=21, minute=30)
     if kickoff is None:
         return {
             "phase": "时间待确认", "isLocked": False, "isEarlyMatch": False,
             "finalAnalysisAt": global_final.isoformat(), "lockAt": global_lock.isoformat(),
             "minutesToKickoff": None,
         }
-    final_at = min(kickoff - timedelta(minutes=90), global_final)
-    lock_at = min(kickoff - timedelta(minutes=60), global_lock)
+    final_at = min(kickoff - timedelta(minutes=20), global_final)
+    lock_at = min(kickoff - timedelta(minutes=10), global_lock)
     minutes = int((kickoff - current).total_seconds() // 60)
     if current >= kickoff:
         phase = "已开赛"
@@ -481,7 +481,7 @@ def analysis_schedule(match: dict[str, Any], now: datetime | None = None) -> dic
     return {
         "phase": phase,
         "isLocked": current >= lock_at,
-        "isEarlyMatch": kickoff.date() == business_date.date() and kickoff.time() < datetime.strptime("21:00", "%H:%M").time(),
+        "isEarlyMatch": kickoff <= global_lock,
         "finalAnalysisAt": final_at.isoformat(),
         "lockAt": lock_at.isoformat(),
         "minutesToKickoff": minutes,
@@ -1747,6 +1747,24 @@ def official_history_fundamentals(
 LINEUP_CHECKPOINTS = (180, 90, 45, 20)
 
 
+def injury_refresh_ttl(business_date_text: str, current: datetime | None = None) -> timedelta:
+    """Expire the daily injury cache at the next ticketing-relevant checkpoint."""
+    now = current or now_shanghai()
+    try:
+        day = datetime.fromisoformat(business_date_text).replace(tzinfo=SHANGHAI)
+    except ValueError:
+        day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    checkpoints = [
+        day.replace(hour=9, minute=0),
+        day.replace(hour=15, minute=0),
+        day.replace(hour=18, minute=30),
+        day.replace(hour=20, minute=30),
+    ]
+    future = [checkpoint for checkpoint in checkpoints if checkpoint > now]
+    next_refresh = future[0] if future else (day + timedelta(days=1)).replace(hour=9, minute=0)
+    return max(timedelta(minutes=10), next_refresh - now)
+
+
 def due_lineup_checkpoint(
     connection: sqlite3.Connection, fixture_id: int, minutes_to_kickoff: int
 ) -> int | None:
@@ -1892,10 +1910,15 @@ def enrich_fundamentals(
         if not fixtures_by_date.get(date):
             injuries_by_date[date] = None
             continue
+        date_matches = [item for item in normalized_by_id.values() if item.get("kickoffDate") == date]
+        if date_matches and all(analysis_schedule(item, now_shanghai())["isLocked"] for item in date_matches):
+            injuries_by_date[date] = None
+            continue
+        business_date = str((date_matches[0] if date_matches else {}).get("businessDate") or date)
         try:
             injuries_by_date[date] = api_football_request(
                 connection, api_key, "injuries", {"date": date, "timezone": "Asia/Shanghai"},
-                timedelta(hours=4), timeout, retries, purpose="伤停停赛", priority="high",
+                injury_refresh_ttl(business_date), timeout, retries, purpose="伤停停赛", priority="high",
             )
         except RuntimeError as error:
             logging.warning("API-Football injuries unavailable for %s: %s", date, error)
@@ -1905,6 +1928,8 @@ def enrich_fundamentals(
     detail_candidates: list[tuple[int, int]] = []
     for match_id, (fixture, _confidence) in mapped.items():
         schedule_match = normalized_by_id[match_id]
+        if analysis_schedule(schedule_match, now)["isLocked"]:
+            continue
         kickoff = parse_kickoff(schedule_match)
         fixture_id = int(((fixture.get("fixture") or {}).get("id") or 0))
         previous_fundamentals = (previous_by_id.get(match_id) or {}).get("fundamentals") or {}
@@ -2634,8 +2659,8 @@ def operations_summary(
             **api_usage,
             "schedule": {
                 "fixtures": "每6小时按日期批量刷新",
-                "injuries": "每4小时按日期批量刷新",
-                "lineups": "赛前180/90/45/20分钟",
+                "injuries": "09:00/15:00/18:30/20:30，早场同步提前",
+                "lineups": "赛前180/90/45/20分钟；21:30后停止改推荐",
             },
         },
         "professionalData": {
