@@ -363,6 +363,29 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(adjusted["modelVersion"], "v2-market-fundamentals")
         self.assertGreater(adjusted["probabilities"]["home"], base["probabilities"]["home"])
 
+    def test_absence_summary_deduplicates_players_and_classifies_status(self):
+        items = [
+            {"fixture": {"id": 99}, "team": {"id": 1}, "player": {"id": 7, "name": "A", "reason": "Knee injury"}},
+            {"fixture": {"id": 99}, "team": {"id": 1}, "player": {"id": 7, "name": "A", "reason": "Knee injury"}},
+            {"fixture": {"id": 99}, "team": {"id": 1}, "player": {"id": 8, "name": "B", "reason": "Suspended"}},
+            {"fixture": {"id": 99}, "team": {"id": 1}, "player": {"id": 9, "name": "C", "reason": "Doubtful"}},
+        ]
+        summary = collector.absence_summary(items, 99, 1)
+        self.assertEqual(summary["total"], 3)
+        self.assertEqual(summary["duplicatesRemoved"], 1)
+        self.assertEqual((summary["injuries"], summary["suspensions"], summary["doubtful"]), (1, 1, 1))
+        self.assertTrue(summary["usedForModel"])
+
+    def test_abnormal_absence_volume_is_not_used_by_model(self):
+        items = [
+            {"fixture": {"id": 99}, "team": {"id": 1}, "player": {"id": index, "name": f"P{index}", "reason": "Injury"}}
+            for index in range(1, 14)
+        ]
+        summary = collector.absence_summary(items, 99, 1)
+        self.assertFalse(summary["reliable"])
+        self.assertFalse(summary["usedForModel"])
+        self.assertIn("超过12人", summary["anomalyReason"])
+
     def test_candidate_model_stays_between_market_and_fundamental_model(self):
         base = collector.market_analysis(collector.flatten_matches(SAMPLE)[0])
         primary = json.loads(json.dumps(base, ensure_ascii=False))

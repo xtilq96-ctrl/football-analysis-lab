@@ -676,6 +676,10 @@ TEAM_ALIAS_SEEDS = {
     "梅斯": "Metz", "利兹联": "Leeds", "纽卡斯尔联": "Newcastle",
     "比利亚雷亚尔": "Villarreal", "皇家贝蒂斯": "Real Betis",
     "布拉加": "SC Braga", "埃斯托里尔": "Estoril",
+    "叻武里": "Ratchaburi", "上海海港": "Shanghai Port",
+    "大田市民": "Daejeon Hana Citizen", "京都不死鸟": "Kyoto Sanga",
+    "卡塔尔亚足": "Qatar U23", "韩国亚运男足": "South Korea U23",
+    "北京国安": "Beijing Guoan", "浦项制铁": "Pohang Steelers",
 }
 
 
@@ -901,21 +905,47 @@ def absence_summary(items: list[dict[str, Any]], fixture_id: int, team_id: int) 
         if int(((item.get("fixture") or {}).get("id") or 0)) == fixture_id
         and int(((item.get("team") or {}).get("id") or 0)) == team_id
     ]
-    suspension_words = ("suspend", "red card", "yellow card", "disciplin")
-    suspensions = sum(
-        1 for item in selected
-        if any(word in str((item.get("player") or {}).get("reason") or "").lower() for word in suspension_words)
-    )
+    unique: dict[str, dict[str, Any]] = {}
+    for item in selected:
+        player = item.get("player") or {}
+        player_id = str(player.get("id") or "")
+        player_name = str(player.get("name") or "").strip()
+        key = player_id or alias_key(player_name)
+        if not key:
+            continue
+        unique.setdefault(key, item)
+    cleaned = list(unique.values())
+    suspension_words = ("suspend", "red card", "yellow card", "disciplin", "ban")
+    doubtful_words = ("doubt", "questionable", "uncertain", "test", "minor")
+
+    def category(item: dict[str, Any]) -> str:
+        player = item.get("player") or {}
+        reason = f"{player.get('type') or ''} {player.get('reason') or ''}".lower()
+        if any(word in reason for word in suspension_words):
+            return "suspension"
+        if any(word in reason for word in doubtful_words):
+            return "doubtful"
+        return "injury"
+
+    categories = [category(item) for item in cleaned]
+    reliable = len(cleaned) <= 12
     return {
-        "total": len(selected),
-        "injuries": len(selected) - suspensions,
-        "suspensions": suspensions,
+        "total": len(cleaned),
+        "rawTotal": len(selected),
+        "duplicatesRemoved": max(0, len(selected) - len(cleaned)),
+        "injuries": categories.count("injury"),
+        "suspensions": categories.count("suspension"),
+        "doubtful": categories.count("doubtful"),
+        "reliable": reliable,
+        "usedForModel": reliable,
+        "anomalyReason": None if reliable else "单队缺阵记录超过12人，已暂停用于概率修正",
         "players": [
             {
                 "name": str((item.get("player") or {}).get("name") or ""),
                 "reason": str((item.get("player") or {}).get("reason") or "未说明"),
+                "category": category(item),
             }
-            for item in selected[:8]
+            for item in cleaned[:12]
         ],
     }
 
@@ -933,8 +963,10 @@ def blend_fundamentals(base: dict[str, Any], fundamentals: dict[str, Any]) -> di
         delta -= 0.05
     if away_rest is not None and away_rest < 4:
         delta += 0.05
-    delta += min(0.10, away["absences"]["injuries"] * 0.015 + away["absences"]["suspensions"] * 0.025)
-    delta -= min(0.10, home["absences"]["injuries"] * 0.015 + home["absences"]["suspensions"] * 0.025)
+    if (away.get("absences") or {}).get("usedForModel", True):
+        delta += min(0.10, away["absences"]["injuries"] * 0.015 + away["absences"]["suspensions"] * 0.025)
+    if (home.get("absences") or {}).get("usedForModel", True):
+        delta -= min(0.10, home["absences"]["injuries"] * 0.015 + home["absences"]["suspensions"] * 0.025)
     delta = max(-0.28, min(0.28, delta))
     weighted = [
         float(market["home"]) * math.exp(delta),
@@ -1102,7 +1134,9 @@ def prediction_data_quality(item: dict[str, Any]) -> dict[str, Any]:
         missing.append("专业比赛匹配")
 
     absence_ready = all(
-        ((team.get("absences") or {}).get("available") is True) for team in (home, away)
+        ((team.get("absences") or {}).get("available") is True)
+        and ((team.get("absences") or {}).get("reliable") is not False)
+        for team in (home, away)
     )
     if absence_ready:
         score += 15
@@ -2617,6 +2651,18 @@ def operations_summary(
         1 for item in matches
         if (((item.get("fundamentals") or {}).get("home") or {}).get("absences") or {}).get("available")
         and (((item.get("fundamentals") or {}).get("away") or {}).get("absences") or {}).get("available")
+        and (((item.get("fundamentals") or {}).get("home") or {}).get("absences") or {}).get("reliable") is not False
+        and (((item.get("fundamentals") or {}).get("away") or {}).get("absences") or {}).get("reliable") is not False
+    )
+    injury_anomalies = sum(
+        1 for item in matches
+        if any(
+            ((team.get("absences") or {}).get("reliable") is False)
+            for team in (
+                ((item.get("fundamentals") or {}).get("home") or {}),
+                ((item.get("fundamentals") or {}).get("away") or {}),
+            )
+        )
     )
     lineup_confirmed = sum(
         1 for item in matches
@@ -2666,6 +2712,7 @@ def operations_summary(
         "professionalData": {
             "matchedMatches": professional_matched,
             "injuryAvailableMatches": injury_available,
+            "injuryAnomalyMatches": injury_anomalies,
             "confirmedLineupMatches": lineup_confirmed,
             "aliasCount": alias_count,
             "mappingDiagnostics": diagnostic_counts,

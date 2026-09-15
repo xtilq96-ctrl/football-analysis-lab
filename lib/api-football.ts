@@ -36,7 +36,12 @@ type TeamForm = {
 type TeamFundamentals = {
   apiName: string;
   form: TeamForm;
-  absences: { total: number; injuries: number; suspensions: number; players: Array<{ name: string; reason: string }>; available?: boolean };
+  absences: {
+    total: number; rawTotal?: number; duplicatesRemoved?: number;
+    injuries: number; suspensions: number; doubtful?: number;
+    reliable?: boolean; usedForModel?: boolean; anomalyReason?: string | null;
+    players: Array<{ name: string; reason: string; category?: string }>; available?: boolean;
+  };
   lineup: { confirmed: boolean; formation?: string | null; startingCount: number; available?: boolean };
 };
 type Fundamentals = {
@@ -138,7 +143,7 @@ export type OperationsSummary = {
     schedule: { fixtures: string; injuries: string; lineups: string };
   };
   professionalData?: {
-    matchedMatches: number; injuryAvailableMatches: number;
+    matchedMatches: number; injuryAvailableMatches: number; injuryAnomalyMatches?: number;
     confirmedLineupMatches: number; totalMatches: number;
     aliasCount?: number;
     mappingDiagnostics?: {

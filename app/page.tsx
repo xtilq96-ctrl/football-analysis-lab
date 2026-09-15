@@ -23,6 +23,12 @@ export default async function Home() {
   const withOdds = data.matches.filter((match) => match.marketProbabilities).length;
   const completeness = data.matches.length ? Math.round((predicted / data.matches.length) * 100) : 0;
   const fundamentalsReady = data.matches.filter((match) => (match.fundamentals?.coverage ?? 0) >= 4).length;
+  const injuriesReady = data.matches.filter((match) => {
+    const home = match.fundamentals?.home?.absences;
+    const away = match.fundamentals?.away?.absences;
+    return home?.available && away?.available && home.reliable !== false && away.reliable !== false;
+  }).length;
+  const injuryWarnings = data.matches.filter((match) => match.fundamentals?.home?.absences.reliable === false || match.fundamentals?.away?.absences.reliable === false).length;
   const lineupsReady = data.matches.filter((match) => match.fundamentals?.home?.lineup.confirmed && match.fundamentals?.away?.lineup.confirmed).length;
   const fundamentalCompleteness = data.matches.length ? Math.round((fundamentalsReady / data.matches.length) * 100) : 0;
   const numberRange = data.matches.length
@@ -91,7 +97,8 @@ export default async function Home() {
               <StatusRow label="官方固定奖" value={withOdds ? '已接入' : '等待中'} meta={`${withOdds}/${data.matches.length} 场`} muted={!withOdds} />
               <StatusRow label="去水概率" value={predicted ? '已生成' : '等待中'} meta={`${predicted}/${data.matches.length} 场`} muted={!predicted} />
               <StatusRow label="体彩历史基本面" value={fundamentalsReady ? '已生成' : '回填中'} meta={`${fundamentalsReady}/${data.matches.length} 场 · 近120天样本`} muted={!fundamentalsReady} />
-              <StatusRow label="伤停与临场首发" value={lineupsReady ? '已确认' : '等待专业源'} meta={`${lineupsReady} 场双方首发确认`} muted={!lineupsReady} />
+              <StatusRow label="伤停与停赛" value={injuriesReady ? '已读取' : '等待专业源'} meta={`${injuriesReady}/${data.matches.length} 场可信${injuryWarnings ? ` · ${injuryWarnings}场异常已隔离` : ''}`} muted={!injuriesReady} />
+              <StatusRow label="临场首发" value={lineupsReady ? '已确认' : '等待赛前公布'} meta={`${lineupsReady}/${data.matches.length} 场双方确认`} muted={!lineupsReady} />
               <StatusRow label="赛果自动结算" value={data.performance.settledMatches ? '已运行' : '等待完赛'} meta={`${data.performance.settledMatches} 场已核对`} muted={!data.performance.settledMatches} />
               <StatusRow label="数据模式" value={data.sourceMode === 'mainland_relay' ? '大陆自动采集' : data.sourceMode === 'stale_relay' ? '安全快照' : data.sourceMode === 'live' ? '官方直连' : '官方快照'} meta={data.sourceMode === 'mainland_relay' ? '每 5 分钟更新' : data.sourceMode === 'live' ? '实时读取' : '多路自动恢复中'} muted={data.sourceMode === 'verified_snapshot' || data.sourceMode === 'stale_relay'} />
             </CardContent>
@@ -200,7 +207,7 @@ function TeamFormPanel({ name, team }: { name: string; team: NonNullable<NonNull
       <span>零封率 <b className="text-white/70">{form.cleanSheetRate ?? '—'}%</b></span>
       <span>休息 <b className="text-white/70">{form.restDays ?? '—'} 天</b></span>
       <span>14天赛程 <b className="text-white/70">{form.matchesLast14Days} 场</b></span>
-      <span>伤停/停赛 <b className="text-white/70">{team.absences.available === false ? '等待专业源' : `${team.absences.injuries}/${team.absences.suspensions}`}</b></span>
+      <span>伤停/停赛/存疑 <b className={team.absences.reliable === false ? 'text-orange-300' : 'text-white/70'}>{team.absences.available === false ? '等待专业源' : team.absences.reliable === false ? '异常已隔离' : `${team.absences.injuries}/${team.absences.suspensions}/${team.absences.doubtful ?? 0}`}</b></span>
       <span>首发 <b className={team.lineup.confirmed ? 'text-emerald-300' : 'text-amber-300'}>{team.lineup.confirmed ? `已确认${team.lineup.formation ? ` · ${team.lineup.formation}` : ''}` : team.lineup.available === false ? '等待专业源' : '未公布'}</b></span>
     </div>
   </div>;
