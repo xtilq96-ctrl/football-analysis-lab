@@ -1,6 +1,6 @@
 import {
   Activity, BarChart3, Bell, CalendarDays, ChevronRight, CircleAlert, Clock3,
-  Database, Gauge, ShieldCheck, Sparkles, Trophy,
+  Database, Gauge, Goal, Medal, ShieldCheck, Sparkles, Trophy,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -75,6 +75,12 @@ export default async function Home() {
             <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[.035] px-3 py-2 text-sm text-white/65"><CalendarDays className="h-4 w-4 text-white/40" />体彩业务日</div>
           </div>
 
+          <div className="pitch-overview mb-5 grid grid-cols-3 overflow-hidden rounded-2xl border border-lime-200/15">
+            <OverviewMetric icon={<Goal />} label="今日场次" value={String(data.matches.length)} suffix="场" />
+            <OverviewMetric icon={<Sparkles />} label="模型已分析" value={String(predicted)} suffix="场" />
+            <OverviewMetric icon={<ShieldCheck />} label="基本面覆盖" value={String(fundamentalCompleteness)} suffix="%" />
+          </div>
+
           <div className={`mb-5 flex items-start gap-3 rounded-2xl p-4 text-sm ${data.error ? 'border border-amber-400/15 bg-amber-400/[.065] text-amber-100/75' : 'border border-sky-400/15 bg-sky-400/[.065] text-sky-100/75'}`}>
             <CircleAlert className={`mt-0.5 h-4 w-4 shrink-0 ${data.error ? 'text-amber-300' : 'text-sky-300'}`} />
             <p>{data.error ? <><span className="font-medium">官方数据暂时未返回：</span>{data.error}。系统会在下次访问时重试。</> : data.sourceMode === 'verified_snapshot' ? <><span className="font-medium text-sky-200">已显示官方核验快照。</span> 自动采集数据暂时不可用，页面会继续重试。</> : data.sourceMode === 'stale_relay' ? <><span className="font-medium text-amber-200">正在使用最近一次安全快照。</span> 多路数据源会自动重试，页面不会因短时缓存故障清空。</> : data.sourceMode === 'mainland_relay' ? <><span className="font-medium text-sky-200">南京采集节点运行正常。</span> 每5分钟读取中国体育彩票官方数据并校验签名，已开赛场次与赔率变化持续留存。</> : <><span className="font-medium text-sky-200">官方数据已连接。</span> 场次、时间和固定奖来自中国体育彩票公开接口；概率由官方固定奖去水换算。</>}</p>
@@ -133,7 +139,7 @@ export default async function Home() {
 function MatchCard({ match }: { match: DashboardMatch }) {
   const [home, draw, away] = match.probabilities ?? [0, 0, 0];
   return (
-    <Card className="group border-white/8 bg-white/[.035] py-0 shadow-none transition-colors hover:border-white/15 hover:bg-white/[.05]">
+    <Card className="match-card group overflow-hidden border-white/8 bg-[#0a1711]/72 py-0 shadow-none transition-all duration-300 hover:-translate-y-0.5 hover:border-lime-200/20 hover:bg-[#0c1b14]/82">
       <CardContent className="p-5 sm:p-6">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-white/42"><Badge className="border-lime-300/20 bg-lime-300/10 text-lime-200">{match.officialNumber}</Badge><span className="truncate">{match.league}</span><span>·</span><span>{match.dateLabel}</span><Clock3 className="h-3.5 w-3.5" /><span>{match.time}</span>{match.analysisSchedule?.isEarlyMatch && <Badge variant="outline" className="border-sky-400/20 text-sky-300">早场</Badge>}{match.analysisSchedule && <Badge variant="outline" className={match.analysisSchedule.isLocked ? 'border-emerald-400/20 text-emerald-300' : 'border-white/10 text-white/50'}>{match.analysisSchedule.phase}</Badge>}</div>
@@ -171,10 +177,10 @@ function MatchCard({ match }: { match: DashboardMatch }) {
 
 function RecommendationPanel({ recommendations, decision }: { recommendations: DashboardRecommendation[]; decision: RecommendationDecision | null }) {
   return (
-    <Card className="mb-5 border-lime-300/15 bg-[linear-gradient(135deg,rgba(190,242,100,.08),rgba(255,255,255,.025))] shadow-none">
+    <Card className="champion-panel relative mb-5 overflow-hidden border-lime-300/20 bg-[linear-gradient(135deg,rgba(190,242,100,.12),rgba(255,255,255,.025))] shadow-none">
       <CardHeader className="pb-3">
         <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base font-medium">
-          <span className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-lime-300" />自动组合决策 · {recommendations[0]?.type ?? '今日不推荐'}</span>
+          <span className="flex items-center gap-2"><span className="grid h-8 w-8 place-items-center rounded-full border border-lime-200/25 bg-lime-200/10"><Medal className="h-4 w-4 text-lime-200" /></span>自动组合决策 · {recommendations[0]?.type ?? '今日不推荐'}</span>
           <span className="text-xs font-normal text-white/35">V2 市场概率 + 球队基本面 + 泊松比分</span>
         </CardTitle>
       </CardHeader>
@@ -227,4 +233,8 @@ function StatusRow({ label, value, meta, muted = false }: { label: string; value
 
 function Metric({ label, value, unit }: { label: string; value: string; unit: string }) {
   return <div className="rounded-2xl border border-white/8 bg-white/[.03] p-4"><p className="text-xs text-white/38">{label}</p><p className="mt-1 text-2xl font-semibold tracking-tight">{value}<span className="ml-1 text-sm font-normal text-white/35">{unit}</span></p></div>;
+}
+
+function OverviewMetric({ icon, label, value, suffix }: { icon: React.ReactNode; label: string; value: string; suffix: string }) {
+  return <div className="flex min-w-0 items-center justify-center gap-2.5 border-r border-white/8 px-2 py-3.5 last:border-r-0 sm:justify-start sm:px-4"><span className="hidden text-lime-200/75 sm:block [&>svg]:h-[18px] [&>svg]:w-[18px]">{icon}</span><span className="min-w-0"><span className="block truncate text-[11px] text-white/42 sm:text-xs">{label}</span><b className="mt-0.5 block text-base font-semibold tracking-tight text-white sm:text-lg">{value}<small className="ml-1 text-xs font-normal text-white/38">{suffix}</small></b></span></div>;
 }
