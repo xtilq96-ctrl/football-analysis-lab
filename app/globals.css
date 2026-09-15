@@ -20,8 +20,36 @@
 
 * { border-color: var(--border); }
 html { background: var(--background); font-family: var(--font-geist-sans), "Microsoft YaHei", Arial, sans-serif; }
-body { margin: 0; min-width: 320px; background: radial-gradient(circle at 78% 4%, rgba(190,242,100,.055), transparent 25rem), var(--background); color: var(--foreground); }
+body { margin: 0; min-width: 320px; background: var(--background); color: var(--foreground); }
+.football-shell {
+  position: relative;
+  isolation: isolate;
+  background:
+    linear-gradient(180deg, rgba(3,10,7,.46) 0, rgba(7,17,13,.76) 18rem, rgba(7,17,13,.96) 45rem, #07110d 70rem),
+    url('/stadium-cup-bg.png') center top / min(2000px, 100vw) auto no-repeat,
+    #07110d;
+}
+.football-shell::before {
+  position: fixed;
+  z-index: -1;
+  inset: 22rem 0 auto;
+  height: 28rem;
+  content: '';
+  pointer-events: none;
+  opacity: .14;
+  background: repeating-linear-gradient(90deg, transparent 0 7.5rem, rgba(190,242,100,.10) 7.5rem 15rem);
+  mask-image: linear-gradient(to bottom, #000, transparent);
+}
+.football-header { box-shadow: 0 1px 0 rgba(190,242,100,.08), 0 18px 55px rgba(0,0,0,.28); }
+.football-mark { box-shadow: 0 0 0 1px rgba(255,255,255,.22) inset, 0 0 26px rgba(190,242,100,.28); }
+.football-shell [data-slot='card'], .football-glass {
+  backdrop-filter: blur(16px);
+  box-shadow: 0 18px 55px rgba(0,0,0,.16), 0 1px 0 rgba(255,255,255,.025) inset;
+}
 button, a { -webkit-tap-highlight-color: transparent; }
 ::selection { background: rgba(190,242,100,.3); color: white; }
-@media (max-width: 1023px) { body { padding-bottom: 4.5rem; } }
+@media (max-width: 1023px) {
+  body { padding-bottom: 4.5rem; }
+  .football-shell { background-size: 1180px auto; background-position: 58% top; }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }

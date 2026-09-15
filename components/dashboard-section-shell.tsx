@@ -22,11 +22,11 @@ export function DashboardSectionShell({
   children: React.ReactNode;
 }) {
   return (
-    <main className="min-h-screen bg-background pb-20 text-foreground lg:pb-0">
-      <header className="sticky top-0 z-20 border-b border-white/8 bg-[#07110d]/90 backdrop-blur-xl">
+    <main className="football-shell min-h-screen pb-20 text-foreground lg:pb-0">
+      <header className="football-header sticky top-0 z-20 border-b border-lime-300/10 bg-[#06100c]/82 backdrop-blur-xl">
         <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 lg:px-8">
           <a href="/" className="flex items-center gap-3">
-            <span className="grid h-9 w-9 place-items-center rounded-xl bg-lime-300 text-[#07110d]"><Trophy className="h-[19px] w-[19px]" /></span>
+            <span className="football-mark grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-lime-200 to-lime-400 text-[#07110d]"><Trophy className="h-[19px] w-[19px]" /></span>
             <span><b className="block text-[15px] leading-tight">足球 AI 分析台</b><span className="text-xs text-white/45">中国竞彩足球</span></span>
           </a>
           <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300">自动运行中</span>
@@ -45,7 +45,7 @@ export function DashboardSectionShell({
         </aside>
 
         <section className="min-w-0">
-          <div className="mb-6"><h1 className="text-2xl font-semibold tracking-[-0.035em] sm:text-[2rem]">{title}</h1><p className="mt-2 text-sm leading-6 text-white/45">{description}</p></div>
+          <div className="mb-6"><div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[.18em] text-lime-200/75"><Trophy className="h-3.5 w-3.5" />Football Intelligence</div><h1 className="text-2xl font-semibold tracking-[-0.035em] drop-shadow-[0_2px_18px_rgba(0,0,0,.65)] sm:text-[2rem]">{title}</h1><p className="mt-2 text-sm leading-6 text-white/50">{description}</p></div>
           {children}
         </section>
       </div>
@@ -58,5 +58,5 @@ export function DashboardSectionShell({
 }
 
 export function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return <section className="rounded-2xl border border-white/8 bg-white/[.035] p-5 sm:p-6"><h2 className="text-base font-medium text-white/85">{title}</h2><div className="mt-4">{children}</div></section>;
+  return <section className="football-glass rounded-2xl border border-white/9 bg-[#09150f]/76 p-5 sm:p-6"><h2 className="flex items-center gap-2 text-base font-medium text-white/90"><span className="h-1.5 w-1.5 rounded-full bg-lime-300 shadow-[0_0_12px_rgba(190,242,100,.8)]" />{title}</h2><div className="mt-4">{children}</div></section>;
 }

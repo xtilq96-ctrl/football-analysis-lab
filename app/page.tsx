@@ -36,11 +36,11 @@ export default async function Home() {
     : '暂无场次';
 
   return (
-    <main className="min-h-screen bg-background pb-20 text-foreground lg:pb-0">
-      <header className="sticky top-0 z-20 border-b border-white/8 bg-[#07110d]/90 backdrop-blur-xl">
+    <main className="football-shell min-h-screen pb-20 text-foreground lg:pb-0">
+      <header className="football-header sticky top-0 z-20 border-b border-lime-300/10 bg-[#06100c]/82 backdrop-blur-xl">
         <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-3">
-            <div className="grid h-9 w-9 place-items-center rounded-xl bg-lime-300 text-[#07110d] shadow-[0_0_24px_rgba(190,242,100,.16)]"><Trophy className="h-[19px] w-[19px]" /></div>
+            <div className="football-mark grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-lime-200 to-lime-400 text-[#07110d]"><Trophy className="h-[19px] w-[19px]" /></div>
             <div><p className="text-[15px] font-semibold leading-tight tracking-tight">足球 AI 分析台</p><p className="text-xs text-white/45">中国竞彩足球</p></div>
           </div>
           <div className="flex items-center gap-2">
@@ -68,8 +68,8 @@ export default async function Home() {
         <section className="min-w-0">
           <div className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
             <div>
-              <div className="mb-2 flex items-center gap-2 text-sm text-lime-300"><Activity className="h-4 w-4" />中国体彩官方竞彩赛程</div>
-              <h1 className="text-2xl font-semibold tracking-[-0.035em] sm:text-[2rem]">今日竞彩足球</h1>
+              <div className="mb-2 flex items-center gap-2 text-sm text-lime-200"><Activity className="h-4 w-4" />中国体彩官方竞彩赛程 · 云端球场</div>
+              <h1 className="text-2xl font-semibold tracking-[-0.035em] drop-shadow-[0_2px_18px_rgba(0,0,0,.65)] sm:text-[2rem]">今日竞彩足球</h1>
               <p className="mt-1.5 text-sm text-white/45">{data.businessDate} · {numberRange} · 共 {data.matches.length} 场 · 最近同步 {updatedAt}</p>
             </div>
             <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[.035] px-3 py-2 text-sm text-white/65"><CalendarDays className="h-4 w-4 text-white/40" />体彩业务日</div>
@@ -90,7 +90,7 @@ export default async function Home() {
         </section>
 
         <aside className="space-y-4">
-          <Card className="border-white/8 bg-white/[.035] shadow-none">
+          <Card className="border-lime-200/10 bg-[#09150f]/78 shadow-none">
             <CardHeader className="pb-3"><CardTitle className="flex items-center justify-between text-base font-medium">数据运行状态<span className={`h-2 w-2 rounded-full ${data.error ? 'bg-amber-300' : 'bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,.65)]'}`} /></CardTitle></CardHeader>
             <CardContent className="space-y-4">
               <StatusRow label="体彩官方赛程" value={data.error ? '重试中' : '已导入'} meta={`${data.matches.length} 场 · ${updatedAt}`} muted={Boolean(data.error)} />
