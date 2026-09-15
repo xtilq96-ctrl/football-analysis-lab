@@ -306,6 +306,9 @@ export type DashboardMatch = {
   analysisSchedule: AnalysisSchedule | null;
   result: MatchResult | null;
   settlement: MatchSettlement | null;
+  oddsUpdatedAt: string | null;
+  oddsAgeMinutes: number | null;
+  oddsFreshness: 'fresh' | 'aging' | 'stale' | 'locked' | 'missing';
 };
 
 export type DashboardData = { matches: DashboardMatch[]; recommendations: DashboardRecommendation[]; recommendationDecision: RecommendationDecision | null; performance: PerformanceSummary; dailyReports: DailyReport[]; operations: OperationsSummary | null; updatedAt: string; businessDate: string; sourceMode: 'mainland_relay' | 'stale_relay' | 'live' | 'verified_snapshot'; error?: string };
@@ -540,6 +543,23 @@ function officialNumber(match: SportteryMatch) {
   return `${match.matchWeek}${String(match.matchNum % 1000).padStart(3, '0')}`;
 }
 
+function marketFreshness(match: SportteryMatch): Pick<DashboardMatch, 'oddsUpdatedAt' | 'oddsAgeMinutes' | 'oddsFreshness'> {
+  const updateDate = match.had?.updateDate;
+  const updateTime = match.had?.updateTime;
+  if (!updateDate || !updateTime) return { oddsUpdatedAt: null, oddsAgeMinutes: null, oddsFreshness: 'missing' };
+  const oddsUpdatedAt = `${updateDate}T${updateTime}+08:00`;
+  const parsed = Date.parse(oddsUpdatedAt);
+  if (!Number.isFinite(parsed)) return { oddsUpdatedAt: null, oddsAgeMinutes: null, oddsFreshness: 'missing' };
+  const oddsAgeMinutes = Math.max(0, Math.round((Date.now() - parsed) / 60_000));
+  if (match.analysisSchedule?.isLocked) return { oddsUpdatedAt, oddsAgeMinutes, oddsFreshness: 'locked' };
+  const minutesToKickoff = match.analysisSchedule?.minutesToKickoff;
+  const freshFor = minutesToKickoff !== null && minutesToKickoff !== undefined && minutesToKickoff <= 60
+    ? 45
+    : minutesToKickoff !== null && minutesToKickoff !== undefined && minutesToKickoff <= 180 ? 120 : 360;
+  const oddsFreshness = oddsAgeMinutes <= freshFor ? 'fresh' : oddsAgeMinutes <= freshFor * 2 ? 'aging' : 'stale';
+  return { oddsUpdatedAt, oddsAgeMinutes, oddsFreshness };
+}
+
 export async function getDashboardData(): Promise<DashboardData> {
   let businessDate = shanghaiDate();
   let updatedAt = new Date().toISOString();
@@ -626,6 +646,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         analysisSchedule: item.analysisSchedule ?? null,
         result: item.result ?? null,
         settlement: item.settlement ?? null,
+        ...marketFreshness(item),
       };
     });
     return { matches, recommendations, recommendationDecision, performance, dailyReports, operations, updatedAt, businessDate, sourceMode };
